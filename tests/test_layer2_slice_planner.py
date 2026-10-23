@@ -10,8 +10,7 @@ from monorepo_triage.layer2_slice_planner import (
 class TestTarjanSCCCondensation:
     def test_acyclic_dag_singletons(self) -> None:
         modules = {"app.main": 1000, "app.service": 2000, "app.db": 3000}
-        # app.main depends on app.service, app.service depends on app.db
-        edges = {
+        edges: dict[str, set[str]] = {
             "app.main": {"app.service"},
             "app.service": {"app.db"},
             "app.db": set(),
@@ -22,7 +21,6 @@ class TestTarjanSCCCondensation:
         assert plan.cyclic_knot_count == 0
         assert all(not node.is_cyclic for node in plan.condensation_nodes)
 
-        # Check nodes are present
         node_map = {n.scc_id: n for n in plan.condensation_nodes}
         assert "app.db" in node_map
         assert "app.service" in node_map
@@ -35,8 +33,7 @@ class TestTarjanSCCCondensation:
             "user.model": 1500,
             "billing.core": 900,
         }
-        # Cycle between auth.service and auth.session; both depend on user.model
-        edges = {
+        edges: dict[str, set[str]] = {
             "auth.service": {"auth.session", "user.model"},
             "auth.session": {"auth.service", "user.model"},
             "user.model": set(),
@@ -53,7 +50,7 @@ class TestTarjanSCCCondensation:
 
     def test_self_loop_marked_cyclic(self) -> None:
         modules = {"recursive.worker": 500}
-        edges = {"recursive.worker": {"recursive.worker"}}
+        edges: dict[str, set[str]] = {"recursive.worker": {"recursive.worker"}}
 
         plan = build_modernization_plan(modules, edges, token_budget=16000)
         assert plan.cyclic_knot_count == 1
@@ -64,11 +61,6 @@ class TestTarjanSCCCondensation:
 
 class TestKahnBottomUpWaveAssignment:
     def test_bottom_up_wave_levels(self) -> None:
-        # Architecture:
-        # Wave 0 (leaves, no deps): db, telemetry
-        # Wave 1 (depends on wave 0): cache (-> db), auth (-> db)
-        # Wave 2 (depends on wave 1): api (-> auth, cache)
-        # Wave 3 (depends on wave 2): gateway (-> api)
         modules = {
             "infra.db": 1000,
             "infra.telemetry": 1000,
@@ -77,7 +69,7 @@ class TestKahnBottomUpWaveAssignment:
             "service.api": 1000,
             "edge.gateway": 1000,
         }
-        edges = {
+        edges: dict[str, set[str]] = {
             "infra.db": set(),
             "infra.telemetry": set(),
             "core.cache": {"infra.db"},
@@ -100,22 +92,14 @@ class TestKahnBottomUpWaveAssignment:
 
 class TestDeterministicSliceBinPacking:
     def test_ffd_packing_within_wave(self) -> None:
-        # All in wave 0 (no dependencies)
         modules = {
             "mod.a": 4000,
             "mod.b": 3500,
             "mod.c": 3000,
             "mod.d": 2000,
         }
-        edges = {m: set() for m in modules}
+        edges: dict[str, set[str]] = {m: set() for m in modules}
 
-        # Budget = 9000
-        # FFD sorts: mod.a (4000), mod.b (3500), mod.c (3000), mod.d (2000)
-        # Slice 1: mod.a (4000) + mod.b (3500) = 7500. mod.c (3000) doesn't fit (10500 > 9000).
-        #          mod.d (2000) fits! Total = 9500? Wait, 7500+2000 = 9500 > 9000! Doesn't fit!
-        # Let's check budget = 10000:
-        # Slice 1: mod.a (4000) + mod.b (3500) = 7500. mod.d (2000) fits: 7500 + 2000 = 9500 <= 10000.
-        # Slice 2: mod.c (3000)
         plan = build_modernization_plan(modules, edges, token_budget=10000)
 
         assert len(plan.slices) == 2
@@ -135,11 +119,10 @@ class TestDeterministicSliceBinPacking:
             "leaf.mod": 500,
             "parent.mod": 500,
         }
-        edges = {
+        edges: dict[str, set[str]] = {
             "leaf.mod": set(),
             "parent.mod": {"leaf.mod"},
         }
-        # Even with generous budget 16000, wave 0 and wave 1 must be separate slices
         plan = build_modernization_plan(modules, edges, token_budget=16000)
         assert len(plan.slices) == 2
         assert {s.wave for s in plan.slices} == {0, 1}
@@ -149,12 +132,11 @@ class TestDeterministicSliceBinPacking:
             "monolith.heavy": 25000,
             "light.helper": 1000,
         }
-        edges = {
+        edges: dict[str, set[str]] = {
             "monolith.heavy": set(),
             "light.helper": set(),
         }
 
-        # Budget = 16000
         plan = build_modernization_plan(modules, edges, token_budget=16000)
         oversized = [s for s in plan.slices if s.status == "OVERSIZED_COUPLED_KNOT"]
         assert len(oversized) == 1
