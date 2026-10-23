@@ -2,6 +2,7 @@
 
 import math
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -30,13 +31,13 @@ class TestTokenBudgetValidation:
 
     def test_type_enforcement(self) -> None:
         with pytest.raises(TypeError):
-            validate_token_budget(True)  # type: ignore[arg-type]
+            validate_token_budget(cast(int, True))
         with pytest.raises(TypeError):
-            validate_token_budget(False)  # type: ignore[arg-type]
+            validate_token_budget(cast(int, False))
         with pytest.raises(TypeError):
-            validate_token_budget(16000.0)  # type: ignore[arg-type]
+            validate_token_budget(cast(int, 16000.0))
         with pytest.raises(TypeError):
-            validate_token_budget("16000")  # type: ignore[arg-type]
+            validate_token_budget(cast(int, "16000"))
 
 
 class TestLineLengthLimitValidation:
@@ -53,11 +54,11 @@ class TestLineLengthLimitValidation:
 
     def test_type_enforcement(self) -> None:
         with pytest.raises(TypeError):
-            validate_line_length_limit(True)  # type: ignore[arg-type]
+            validate_line_length_limit(cast(int, True))
         with pytest.raises(TypeError):
-            validate_line_length_limit(1000.5)  # type: ignore[arg-type]
+            validate_line_length_limit(cast(int, 1000.5))
         with pytest.raises(TypeError):
-            validate_line_length_limit("1000")  # type: ignore[arg-type]
+            validate_line_length_limit(cast(int, "1000"))
 
 
 class TestEntropyThresholdValidation:
@@ -82,9 +83,9 @@ class TestEntropyThresholdValidation:
 
     def test_type_enforcement(self) -> None:
         with pytest.raises(TypeError):
-            validate_entropy_threshold(True)  # type: ignore[arg-type]
+            validate_entropy_threshold(cast(float, True))
         with pytest.raises(TypeError):
-            validate_entropy_threshold("5.2")  # type: ignore[arg-type]
+            validate_entropy_threshold(cast(float, "5.2"))
 
 
 class TestPathConfinement:
@@ -152,4 +153,4 @@ class TestEstimateSourceTokens:
 
     def test_type_enforcement(self) -> None:
         with pytest.raises(TypeError):
-            estimate_source_tokens(123)  # type: ignore[arg-type]
+            estimate_source_tokens(cast(str, 123))
