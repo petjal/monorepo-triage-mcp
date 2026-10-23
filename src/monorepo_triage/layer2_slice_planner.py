@@ -126,12 +126,23 @@ def build_modernization_plan(
 
     mod_to_scc: dict[str, str] = {}
     scc_meta: list[_RawSccItem] = []
+    used_scc_ids: set[str] = set(valid_modules.keys())
 
     for scc_mods in raw_sccs:
         is_cyclic = len(scc_mods) > 1 or (
             len(scc_mods) == 1 and scc_mods[0] in clean_edges.get(scc_mods[0], set())
         )
-        scc_id = "+".join(scc_mods) if len(scc_mods) > 1 else scc_mods[0]
+        if len(scc_mods) == 1:
+            scc_id = scc_mods[0]
+        else:
+            scc_id = "+".join(scc_mods)
+            if scc_id in used_scc_ids:
+                scc_id = f"cycle({'+'.join(scc_mods)})"
+                suffix = 2
+                while scc_id in used_scc_ids:
+                    scc_id = f"cycle_{suffix}({'+'.join(scc_mods)})"
+                    suffix += 1
+            used_scc_ids.add(scc_id)
         total_tokens = sum(valid_modules[m] for m in scc_mods)
         for m in scc_mods:
             mod_to_scc[m] = scc_id
@@ -266,6 +277,67 @@ def build_modernization_plan(
     )
 
 
+SOURCE_ROOT_MARKERS: tuple[str, ...] = (
+    "src.main.java.",
+    "src.test.java.",
+    "src.main.kotlin.",
+    "src.",
+    "lib.",
+)
+
+
+def _resolve_import_targets(
+    imp: str,
+    self_mod_id: str,
+    active_module_set: set[str],
+    alias_to_targets: dict[str, set[str]],
+    go_dir_to_modules: dict[str, set[str]],
+) -> set[str]:
+    """Resolve an import string to one or more known internal module_ids across polyglot layouts."""
+    resolved: set[str] = set()
+
+    # 1. Go package path suffix matching (e.g. 'github.com/acme/repo/pkg/db' -> 'pkg/db')
+    if "/" in imp and not imp.startswith("."):
+        slash_parts = imp.split("/")
+        for i in range(len(slash_parts)):
+            sub_dir = "/".join(slash_parts[i:])
+            if sub_dir in go_dir_to_modules:
+                for target_mod in go_dir_to_modules[sub_dir]:
+                    if target_mod != self_mod_id:
+                        resolved.add(target_mod)
+                if resolved:
+                    return resolved
+
+    # 2. Direct module or alias match (including barrel index.ts and nested src/ layouts)
+    if imp in active_module_set:
+        if imp != self_mod_id:
+            resolved.add(imp)
+        return resolved
+    if imp in alias_to_targets:
+        for target_mod in alias_to_targets[imp]:
+            if target_mod != self_mod_id:
+                resolved.add(target_mod)
+        return resolved
+
+    # 3. Single-level symbol stripping (e.g. 'pkg.service.UserService' -> 'pkg.service')
+    if "." in imp:
+        parent_cand = imp.rsplit(".", 1)[0]
+        # Avoid false child -> parent __init__.py cycles when a submodule imports an unknown symbol
+        # from its own parent package namespace (e.g. pkg.service importing pkg.UNKNOWN_CONST).
+        if self_mod_id.startswith(parent_cand + "."):
+            return resolved
+        if parent_cand in active_module_set and parent_cand != self_mod_id:
+            resolved.add(parent_cand)
+            return resolved
+        if parent_cand in alias_to_targets:
+            for target_mod in alias_to_targets[parent_cand]:
+                if target_mod != self_mod_id and not self_mod_id.startswith(target_mod + "."):
+                    resolved.add(target_mod)
+            return resolved
+
+    return resolved
+
+
 def plan_from_scan(
     scan_summary: ScanSummary,
     token_budget: int = 16000,
@@ -280,19 +352,45 @@ def plan_from_scan(
         modules[f.module_id] = modules.get(f.module_id, 0) + f.estimated_tokens
     active_module_set = set(modules.keys())
 
+    alias_to_targets: dict[str, set[str]] = {}
+    for mod_id in sorted(active_module_set):
+        # TypeScript / JS barrel index resolution (src.auth.index -> src.auth)
+        if mod_id.endswith(".index"):
+            barrel_prefix = mod_id[: -len(".index")]
+            if barrel_prefix and barrel_prefix not in active_module_set:
+                alias_to_targets.setdefault(barrel_prefix, set()).add(mod_id)
+
+        # Root and nested monorepo source-root prefixes (src., packages.core.src., billing.src.main.java.)
+        for marker in SOURCE_ROOT_MARKERS:
+            if mod_id.startswith(marker):
+                stripped = mod_id[len(marker) :]
+                if stripped and stripped not in active_module_set:
+                    alias_to_targets.setdefault(stripped, set()).add(mod_id)
+            nested_marker = "." + marker
+            if nested_marker in mod_id:
+                idx = mod_id.find(nested_marker)
+                stripped = mod_id[idx + len(nested_marker) :]
+                if stripped and stripped not in active_module_set:
+                    alias_to_targets.setdefault(stripped, set()).add(mod_id)
+
+    go_dir_to_modules: dict[str, set[str]] = {}
+    for f in active_files:
+        if f.rel_path.endswith(".go") and f.module_id:
+            rel_dir = f.rel_path.rsplit("/", 1)[0] if "/" in f.rel_path else "."
+            go_dir_to_modules.setdefault(rel_dir, set()).add(f.module_id)
+
     edges: dict[str, set[str]] = {mod_id: set() for mod_id in active_module_set}
     for f in active_files:
         assert f.module_id is not None
         deps = edges[f.module_id]
         for imp in f.imports:
-            if imp in active_module_set and imp != f.module_id:
-                deps.add(imp)
-            else:
-                parts = imp.split(".")
-                for k in range(len(parts) - 1, 0, -1):
-                    prefix = ".".join(parts[:k])
-                    if prefix in active_module_set and prefix != f.module_id:
-                        deps.add(prefix)
-                        break
+            targets = _resolve_import_targets(
+                imp,
+                f.module_id,
+                active_module_set,
+                alias_to_targets,
+                go_dir_to_modules,
+            )
+            deps.update(targets)
 
     return build_modernization_plan(modules, edges, token_budget=token_budget)

@@ -26,6 +26,7 @@ def triage_and_plan_repository(
     token_budget: int = 16000,
     max_line_length: int = 1000,
     entropy_threshold: float = 5.2,
+    include_pruned_files: bool = False,
 ) -> dict[str, Any]:
     """Scan and triage a repository, returning bloat analysis and wave-ordered modernization slices."""
     path = Path(repo_path)
@@ -45,8 +46,16 @@ def triage_and_plan_repository(
     )
     plan = plan_from_scan(scan_summary, token_budget=valid_budget)
 
+    scan_dict = asdict(scan_summary)
+    pruned_count = sum(1 for f in scan_summary.files if f.disposition == "PRUNED_BLOAT")
+    scan_dict["pruned_file_count"] = pruned_count
+    if not include_pruned_files:
+        scan_dict["files"] = [
+            f for f in scan_dict["files"] if f["disposition"] != "PRUNED_BLOAT"
+        ]
+
     return {
-        "scan_summary": asdict(scan_summary),
+        "scan_summary": scan_dict,
         "modernization_plan": asdict(plan),
     }
 
