@@ -1,26 +1,25 @@
 # Verification & Adversarial Audit Log: `monorepo-triage-mcp`
 
-**System:** Deterministic Legacy Repository Pre-Flight Inspector, Bloat Pruner & Topological Slice Planner (FastMCP)  
-**Methodology:** Human-Directed Test-Driven Development (TDD) with Cold-Context Adversarial Model Auditing  
-**Verification Baseline:** 64 passing unit tests in 0.83s (`pytest`), strict static typing (`mypy --strict`), zero lint violations (`ruff`)
+**System:** Deterministic Legacy Repository Pre-Flight Inspector, Neo4j Graph Exporter & Topological Slice Planner (FastMCP)  
+**Workflow:** Spec-Driven Working Prototype -> Cold-Context Adversarial Red-Teaming -> Regression Test Hardening  
+**Verification Baseline:** 65 passing unit tests (`pytest`), strict static typing (`mypy --strict`), zero lint violations (`ruff`)
 
 ---
 
-## 1. Engineering Context & Division of Labor
+## 1. Why We Used "Prototype -> Adversarial Breaker -> Regression Tests" Instead of Pure Test-First TDD
 
-This repository translates lessons from 16 years of enterprise source code scanning (Black Duck Protex / SCA, on-site banking deployments, and `bds_bom_Partition` topology partitioning) into deterministic guardrails for autonomous AI coding platforms.
+Empirical software engineering research (e.g., Fucci et al., *IEEE Transactions on Software Engineering*, "A Dissection of the Test-Driven Development Process: Does It Really Matter to Test-First or to Test-Last?") has shown that strict test-first sequencing itself has no statistically significant impact on code quality compared to iterative test-last development; what drives quality is small, uniform increments and adversarial test coverage.
 
-* **Human Architecture & Domain Specification:**
-  * Defined the Day-1 enterprise repository failure modes: symlink loops and aliases, nested vendored/generated bloat (`packages/*/node_modules`), minified bundles, accidental credential inclusion, and circular dependency knots.
-  * Specified the 4-layer architecture separating boundary corridors (`layer0`), filesystem/AST inspection (`layer1`), graph condensation and wave scheduling (`layer2`), and MCP protocol exposure (`layer3`).
-  * Enforced strict conservation and ordering invariants: Strongly Connected Components (Tarjan 1972) must never be split across separate agent tasks, waves must be scheduled strictly bottom-up (Kahn 1962), and oversized cyclic knots must be flagged (`OVERSIZED_COUPLED_KNOT`) for human seam-carving rather than silently truncated.
-* **AI Synthesis & Cold-Context Adversarial Auditing:**
-  * A fast code-synthesis model generated the initial 8-commit red/green TDD scaffolding under strict static typing (`mypy --strict`).
-  * Two rounds of cold-context adversarial review (using a separate high-reasoning model running 12 live breakage probes) audited the implementation against polyglot monorepo layouts, filesystem edge cases, and graph-theory invariants. Every defect uncovered was first committed as a failing test suite (`[red]`) and then fixed (`[green]`).
+In AI-assisted software engineering, naive single-agent "TDD" has an even sharper failure mode: **when the same model writes the unit tests and the implementation in a single context, its tests share the exact same blindspots as its code.**
+
+This repository demonstrates that failure mode empirically, and how to fix it:
+1. **Stage 1 (Working Prototype):** I defined the 4-layer architecture and operational invariants from 16 years of diagnosing enterprise source code scanners (`bds_bom_Partition`). A fast code-synthesis model built the working prototype and 48 unit tests. All 48 tests passed (`100% green`), `mypy --strict` passed, and `ruff` passed.
+2. **Stage 2 (Cold-Context Adversarial Breaker):** Rather than trusting the 48 green happy-path tests, I ran two rounds of cold-context adversarial auditing (including 12 live Python breakage probes executed by an isolated model with zero build-session context). The breaker immediately broke the "100% green" prototype in **11 places**.
+3. **Stage 3 (Real Regression TDD Around a Working Tool):** With a working nascent tool in hand and 11 concrete failure probes identified, we wrote failing regression tests reproducing each bug before implementing the fixes, bringing the final test suite to 65 tests.
 
 ---
 
-## 2. Round 1 Adversarial Audit Catches (`f794b82 [red]` -> `25a8181 [green]`)
+## 2. Round 1 Audit Catches (5 Defects)
 
 ### Catch 1: Alphabetical Symlink Shadowing Starving Canonical Directories (`layer1_scanner.py`)
 * **The Defect:** The initial scanner tracked visited directory inodes `(st_dev, st_ino)` in a global `visited_dir_inodes` set and recursed into intra-repository directory symlinks. When a directory symlink `a_link` pointed to a real directory `z_real_dir`, alphabetical traversal visited `a_link` first, recorded `z_real_dir`'s inode in `visited_dir_inodes`, and subsequently rejected the canonical physical directory `z_real_dir` as a "symlink loop" when traversal reached `z`.
@@ -44,9 +43,7 @@ This repository translates lessons from 16 years of enterprise source code scann
 
 ---
 
-## 3. Round 2 Cold-Context Probe Catches (`40b1576 [red]` -> `d851178 [green]`, `8c36d79 [red]` -> `7cb4c68 [green]`)
-
-A fresh, zero-context auditor executed 12 adversarial Python probes against the codebase and identified 6 additional architectural and polyglot defects:
+## 3. Round 2 Cold-Context Probe Catches (6 Defects Across 12 Live Probes)
 
 ### Catch 6: Nested Monorepo `recommended_exclusions` & Check Ordering (`layer1_scanner.py`)
 * **The Defect:** On nested monorepo bloat paths such as `packages/web/node_modules/react/index.js`, `recommended_set.add(path_parts[0])` recommended excluding `"packages"` (the entire source tree) instead of `"packages/web/node_modules"`. Furthermore, checking binary null bytes and DLP regexes *before* `BLOAT_DIR_NAMES` caused dummy test keys inside `node_modules/` to trigger false `QUARANTINED_DLP` alerts and prevented binary-only bloat directories (`src/__pycache__`) from reaching `recommended_exclusions`.
@@ -79,7 +76,7 @@ A fresh, zero-context auditor executed 12 adversarial Python probes against the 
 ```text
 +-----------------------------------------------------------------------------------+
 | LAYER 3: FastMCP Protocol Service (server.py)                                     |
-| JSON-RPC Tool Exposure | Compact Bloat Filtering | triage_and_plan_repository     |
+| JSON-RPC Tool Exposure | Compact Bloat Filtering | Action Plan & Neo4j Exporters  |
 +-----------------------------------------+-----------------------------------------+
                                           |
 +-----------------------------------------v-----------------------------------------+
@@ -104,5 +101,5 @@ A fresh, zero-context auditor executed 12 adversarial Python probes against the 
 | :--- | :--- | :--- | :--- |
 | **Layer 0 (`layer0_invariants.py`)** | Rejects `bool`, `NaN`/`Inf`, path traversal (`..`/external symlinks), and negative module weights | `tests/test_layer0_invariants.py` | 100% pass |
 | **Layer 1 (`layer1_scanner.py`)** | Bloat-first directory pruning (`packages/web/node_modules`); skips all symlinks; prunes binary/unreadable/generated/minified files; quarantines PEM/AWS/GH secrets; strips `//` and `/* */` comments | `tests/test_layer1_scanner.py` | 100% pass |
-| **Layer 2 (`layer2_slice_planner.py`)** | Iterative Tarjan SCCs + iterative wave assignment on 1,200-node deep chains; resolves Python `__init__.py`, TypeScript `index.ts`, Go package dirs, and nested monorepo `src/` roots without false cycles | `tests/test_layer2_slice_planner.py` | 100% pass |
-| **Layer 3 (`server.py`)** | End-to-end MCP tool registration, `pruned_file_count` reporting, and compact `include_pruned_files=False` output | `tests/test_server.py` | 100% pass |
+| **Layer 2 (`layer2_slice_planner.py`)** | Iterative Tarjan SCCs + iterative wave assignment on 1,200-node deep chains; resolves Python `__init__.py`, TypeScript `index.ts`, Go package dirs, and nested monorepo `src/` roots; exports Neo4j Cypher & Markdown Action Plan | `tests/test_layer2_slice_planner.py` | 100% pass |
+| **Layer 3 (`server.py`)** | End-to-end MCP tool registration, `pruned_file_count`, Neo4j Cypher, and Action Plan output | `tests/test_server.py` | 100% pass |
