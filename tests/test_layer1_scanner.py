@@ -242,3 +242,37 @@ class TestScanSummaryMetrics:
         assert summary.quarantined_tokens > 0
         assert 0.0 < summary.token_reduction_ratio <= 1.0
         assert "node_modules" in summary.recommended_exclusions
+
+
+class TestAuditRemediationLayer1:
+    def test_alphabetical_symlink_does_not_starve_canonical_directory(self, tmp_path: Path) -> None:
+        """Catch 3: An alphabetical symlink a_link -> z_real_dir must not starve z_real_dir."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        real_dir = repo / "z_real_dir"
+        real_dir.mkdir()
+        (real_dir / "module.py").write_text("def canonical() -> int:\n    return 42\n")
+
+        # Create symlink sorting BEFORE z_real_dir
+        (repo / "a_link").symlink_to(real_dir)
+
+        summary = scan_repository(repo)
+        # z_real_dir is a canonical physical directory; it must NOT be in symlink_loops_skipped
+        assert "z_real_dir" not in summary.symlink_loops_skipped
+        # And z_real_dir/module.py must be indexed under its canonical relative path
+        active_paths = [f.rel_path for f in summary.files if f.disposition == "ACTIVE_SOURCE"]
+        assert "z_real_dir/module.py" in active_paths
+
+    def test_binary_null_byte_file_pruned_safely(self, tmp_path: Path) -> None:
+        """Catch 4: Binary files containing null bytes disguised with .py/.js extension are pruned."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        bin_file = repo / "corrupt_or_wasm.js"
+        bin_file.write_bytes(b"\x00asm\x01\x00\x00\x00" + b"\x00\xff" * 100)
+
+        summary = scan_repository(repo)
+        rec = summary.files[0]
+        assert rec.disposition == "PRUNED_BLOAT"
+        assert rec.reason == "binary_or_oversized_blob"
+        assert rec.module_id is None
+

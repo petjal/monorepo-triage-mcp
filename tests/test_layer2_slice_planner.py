@@ -203,3 +203,88 @@ class TestPlanFromScanIntegration:
         assert node_map["src.infra.db"].wave == 0
         assert node_map["src.service.api"].wave == 1
         assert "src.infra.db" in node_map["src.service.api"].depends_on_sccs
+
+
+class TestAuditRemediationLayer2:
+    def test_deep_1200_node_chain_does_not_hit_recursion_error(self) -> None:
+        """Catch 1: Wave evaluation on a 1,200-node linear dependency chain must be iterative."""
+        depth = 1200
+        modules = {f"mod_{i:04d}": 100 for i in range(depth)}
+        edges: dict[str, set[str]] = {
+            f"mod_{i:04d}": ({f"mod_{i - 1:04d}"} if i > 0 else set())
+            for i in range(depth)
+        }
+        plan = build_modernization_plan(modules, edges, token_budget=16000)
+        assert plan.max_wave_depth == depth - 1
+        assert plan.total_active_tokens == depth * 100
+
+    def test_colliding_module_ids_preserve_token_and_edge_conservation(self) -> None:
+        """Catch 2: Colliding module_ids (e.g., pkg/__init__.py + pkg.py) must aggregate tokens and edges."""
+        files = (
+            FileRecord(
+                rel_path="pkg/__init__.py",
+                module_id="pkg",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=400,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=("pkg.alpha",),
+            ),
+            FileRecord(
+                rel_path="pkg.py",
+                module_id="pkg",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=600,
+                shannon_entropy=4.1,
+                max_line_length=70,
+                imports=("pkg.beta",),
+            ),
+            FileRecord(
+                rel_path="pkg/alpha.py",
+                module_id="pkg.alpha",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=300,
+                shannon_entropy=4.0,
+                max_line_length=50,
+                imports=(),
+            ),
+            FileRecord(
+                rel_path="pkg/beta.py",
+                module_id="pkg.beta",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=500,
+                shannon_entropy=4.0,
+                max_line_length=50,
+                imports=(),
+            ),
+        )
+        scan = ScanSummary(
+            root_path="/tmp/fake_repo",
+            files=files,
+            active_tokens=1800,
+            pruned_tokens=0,
+            quarantined_tokens=0,
+            token_reduction_ratio=0.0,
+            symlink_loops_skipped=(),
+            recommended_exclusions=(),
+        )
+        plan = plan_from_scan(scan, token_budget=16000)
+        assert plan.total_active_tokens == scan.active_tokens == 1800
+        node_map = {n.scc_id: n for n in plan.condensation_nodes}
+        assert node_map["pkg"].total_tokens == 1000
+        assert set(node_map["pkg"].depends_on_sccs) == {"pkg.alpha", "pkg.beta"}
+
+    def test_negative_or_boolean_module_token_weights_rejected(self) -> None:
+        """Catch 5: Negative or boolean module token weights must be rejected before FFD packing."""
+        import pytest
+
+        with pytest.raises(ValueError, match="positive"):
+            build_modernization_plan({"mod.a": -500}, {"mod.a": set()}, token_budget=16000)
+
+        with pytest.raises(TypeError, match="integer"):
+            build_modernization_plan({"mod.a": True}, {"mod.a": set()}, token_budget=16000)
+
