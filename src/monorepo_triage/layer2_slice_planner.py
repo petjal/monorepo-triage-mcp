@@ -3,7 +3,10 @@
 from dataclasses import dataclass
 from typing import Literal
 
-from monorepo_triage.layer0_invariants import validate_token_budget
+from monorepo_triage.layer0_invariants import (
+    validate_module_tokens,
+    validate_token_budget,
+)
 from monorepo_triage.layer1_scanner import ScanSummary
 
 SliceStatus = Literal["READY", "OVERSIZED_COUPLED_KNOT"]
@@ -110,15 +113,16 @@ def build_modernization_plan(
 ) -> ModernizationPlan:
     """Build deterministic modernization plan from module weights and dependency edges."""
     valid_budget = validate_token_budget(token_budget)
+    valid_modules = validate_module_tokens(modules)
 
     # Sanitize and normalize edges to sets of valid modules
     clean_edges: dict[str, set[str]] = {}
-    for mod in modules:
+    for mod in valid_modules:
         raw_deps = edges.get(mod, set())
-        clean_edges[mod] = {dep for dep in raw_deps if dep in modules}
+        clean_edges[mod] = {dep for dep in raw_deps if dep in valid_modules}
 
     # 1. Tarjan SCC Condensation
-    raw_sccs = _solve_tarjan_sccs(modules, clean_edges)
+    raw_sccs = _solve_tarjan_sccs(valid_modules, clean_edges)
 
     mod_to_scc: dict[str, str] = {}
     scc_meta: list[_RawSccItem] = []
@@ -128,7 +132,7 @@ def build_modernization_plan(
             len(scc_mods) == 1 and scc_mods[0] in clean_edges.get(scc_mods[0], set())
         )
         scc_id = "+".join(scc_mods) if len(scc_mods) > 1 else scc_mods[0]
-        total_tokens = sum(modules[m] for m in scc_mods)
+        total_tokens = sum(valid_modules[m] for m in scc_mods)
         for m in scc_mods:
             mod_to_scc[m] = scc_id
         scc_meta.append(
@@ -151,23 +155,32 @@ def build_modernization_plan(
                     deps.add(dep_scc)
         scc_deps[item.scc_id] = tuple(sorted(deps))
 
-    # 3. Bottom-Up Wave Assignment on Condensation DAG (Kahn 1962)
+    # 3. Iterative Bottom-Up Wave Assignment on Condensation DAG (Kahn 1962)
+    # Tarjan emits SCCs in reverse topological order (leaves first), and we also
+    # guard with an explicit iterative post-order stack so arbitrary ordering never recurses.
     wave_memo: dict[str, int] = {}
-
-    def get_wave(scc_id: str) -> int:
-        if scc_id in wave_memo:
-            return wave_memo[scc_id]
-        deps = scc_deps.get(scc_id, ())
-        if not deps:
-            res = 0
-        else:
-            res = 1 + max(get_wave(dep) for dep in deps)
-        wave_memo[scc_id] = res
-        return res
+    for item in scc_meta:
+        if item.scc_id in wave_memo:
+            continue
+        eval_stack: list[tuple[str, bool]] = [(item.scc_id, False)]
+        while eval_stack:
+            curr_id, processed = eval_stack.pop()
+            if curr_id in wave_memo:
+                continue
+            curr_deps = scc_deps.get(curr_id, ())
+            if not curr_deps:
+                wave_memo[curr_id] = 0
+            elif processed or all(d in wave_memo for d in curr_deps):
+                wave_memo[curr_id] = 1 + max(wave_memo[d] for d in curr_deps)
+            else:
+                eval_stack.append((curr_id, True))
+                for d in curr_deps:
+                    if d not in wave_memo:
+                        eval_stack.append((d, False))
 
     condensation_nodes: list[CondensationNode] = []
     for item in scc_meta:
-        w = get_wave(item.scc_id)
+        w = wave_memo[item.scc_id]
         condensation_nodes.append(
             CondensationNode(
                 scc_id=item.scc_id,
@@ -257,17 +270,20 @@ def plan_from_scan(
     scan_summary: ScanSummary,
     token_budget: int = 16000,
 ) -> ModernizationPlan:
-    """Derive modernization plan directly from Layer 1 scan summary."""
+    """Derive modernization plan directly from Layer 1 scan summary, conserving tokens across colliding module IDs."""
     active_files = [
         f for f in scan_summary.files if f.disposition == "ACTIVE_SOURCE" and f.module_id
     ]
-    modules: dict[str, int] = {f.module_id: f.estimated_tokens for f in active_files if f.module_id}
-    active_module_set = set(modules.keys())
-
-    edges: dict[str, set[str]] = {}
+    modules: dict[str, int] = {}
     for f in active_files:
         assert f.module_id is not None
-        deps: set[str] = set()
+        modules[f.module_id] = modules.get(f.module_id, 0) + f.estimated_tokens
+    active_module_set = set(modules.keys())
+
+    edges: dict[str, set[str]] = {mod_id: set() for mod_id in active_module_set}
+    for f in active_files:
+        assert f.module_id is not None
+        deps = edges[f.module_id]
         for imp in f.imports:
             if imp in active_module_set and imp != f.module_id:
                 deps.add(imp)
@@ -278,6 +294,5 @@ def plan_from_scan(
                     if prefix in active_module_set and prefix != f.module_id:
                         deps.add(prefix)
                         break
-        edges[f.module_id] = deps
 
     return build_modernization_plan(modules, edges, token_budget=token_budget)

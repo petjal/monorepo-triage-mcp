@@ -282,9 +282,10 @@ class TestAuditRemediationLayer2:
         """Catch 5: Negative or boolean module token weights must be rejected before FFD packing."""
         import pytest
 
-        with pytest.raises(ValueError, match="positive"):
-            build_modernization_plan({"mod.a": -500}, {"mod.a": set()}, token_budget=16000)
+        empty_edges: dict[str, set[str]] = {"mod.a": set()}
+        with pytest.raises(ValueError, match="non-negative"):
+            build_modernization_plan({"mod.a": -500}, empty_edges, token_budget=16000)
 
         with pytest.raises(TypeError, match="integer"):
-            build_modernization_plan({"mod.a": True}, {"mod.a": set()}, token_budget=16000)
+            build_modernization_plan({"mod.a": True}, empty_edges, token_budget=16000)
 

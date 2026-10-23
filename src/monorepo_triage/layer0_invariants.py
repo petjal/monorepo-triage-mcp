@@ -94,3 +94,22 @@ def estimate_source_tokens(text: str) -> int:
 
     byte_len = len(text.encode("utf-8"))
     return max(1, math.ceil(byte_len / 3.5))
+
+
+def validate_module_tokens(modules: dict[str, int]) -> dict[str, int]:
+    """Validate that module map contains non-empty string keys and positive integer token weights."""
+    if not isinstance(modules, dict):
+        raise TypeError(f"Expected dict for modules, got {type(modules).__name__}")
+    validated: dict[str, int] = {}
+    for mod_id, weight in modules.items():
+        if not isinstance(mod_id, str) or not mod_id.strip():
+            raise ValueError(f"Module ID must be a non-empty string, got {mod_id!r}")
+        if isinstance(weight, bool) or not isinstance(weight, int):
+            raise TypeError(
+                f"Token weight for {mod_id!r} must be an integer, got {type(weight).__name__}"
+            )
+        if weight < 0:
+            raise ValueError(f"Token weight for {mod_id!r} must be non-negative (>= 0), got {weight}")
+        validated[mod_id] = weight
+    return validated
+

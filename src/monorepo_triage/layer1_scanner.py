@@ -46,6 +46,9 @@ SUPPORTED_SOURCE_EXTENSIONS: frozenset[str] = frozenset(
     {".py", ".ts", ".tsx", ".js", ".jsx", ".java", ".go"}
 )
 
+MAX_SOURCE_FILE_BYTES: int = 2 * 1024 * 1024
+BINARY_SNIFF_BYTES: int = 8192
+
 
 @dataclass(frozen=True)
 class FileRecord:
@@ -211,24 +214,17 @@ def scan_repository(
                     continue
 
                 if target_resolved.is_dir():
-                    try:
-                        st = target_resolved.stat()
-                        inode_key = (st.st_dev, st.st_ino)
-                        if inode_key in active_dir_chain or inode_key in visited_dir_inodes:
-                            skipped_symlinks.append(rel_str)
-                            continue
-                        visited_dir_inodes.add(inode_key)
-                        collect_files(target_resolved, active_dir_chain | {inode_key})
-                    except (OSError, PermissionError):
-                        skipped_symlinks.append(rel_str)
-                        continue
+                    # Never recurse into directory symlinks: prevents both ancestor loops
+                    # and alphabetical symlink shadowing of canonical physical directories.
+                    skipped_symlinks.append(rel_str)
+                    continue
                 elif target_resolved.is_file():
                     found_files.append(entry)
             elif entry.is_dir():
                 try:
                     st = entry.stat()
                     inode_key = (st.st_dev, st.st_ino)
-                    if inode_key in active_dir_chain or inode_key in visited_dir_inodes:
+                    if inode_key in active_dir_chain:
                         skipped_symlinks.append(rel_str)
                         continue
                     visited_dir_inodes.add(inode_key)
@@ -246,9 +242,33 @@ def scan_repository(
     for file_path in sorted(found_files, key=lambda p: str(p.relative_to(resolved_root))):
         rel_path = str(file_path.relative_to(resolved_root))
         try:
-            raw_bytes = file_path.read_bytes()
+            file_size = file_path.stat().st_size
+            if file_size > MAX_SOURCE_FILE_BYTES:
+                raw_bytes = b""
+                is_oversized = True
+            else:
+                raw_bytes = file_path.read_bytes()
+                is_oversized = False
         except (OSError, PermissionError):
             raw_bytes = b""
+            is_oversized = False
+
+        is_binary = is_oversized or (b"\x00" in raw_bytes[:BINARY_SNIFF_BYTES])
+        if is_binary:
+            est_tokens = max(1, file_size // 4) if is_oversized else max(1, len(raw_bytes) // 4)
+            records.append(
+                FileRecord(
+                    rel_path=rel_path,
+                    module_id=None,
+                    disposition="PRUNED_BLOAT",
+                    reason="binary_or_oversized_blob",
+                    estimated_tokens=est_tokens,
+                    shannon_entropy=shannon_entropy_bits_per_byte(raw_bytes),
+                    max_line_length=0,
+                    imports=(),
+                )
+            )
+            continue
 
         text = raw_bytes.decode("utf-8", errors="replace")
         lines = text.splitlines()
