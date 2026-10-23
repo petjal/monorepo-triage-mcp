@@ -1,5 +1,6 @@
 """Layer 2: Tarjan SCC Condensation, Bottom-Up Wave Assignment, and Token-Bounded Slice Planner."""
 
+import json
 from dataclasses import dataclass
 from typing import Literal
 
@@ -394,3 +395,85 @@ def plan_from_scan(
             deps.update(targets)
 
     return build_modernization_plan(modules, edges, token_budget=token_budget)
+
+
+def export_neo4j_cypher(plan: ModernizationPlan) -> str:
+    """Export the condensation DAG and wave schedule as deterministic Neo4j Cypher statements."""
+    lines: list[str] = []
+    for node in plan.condensation_nodes:
+        scc_lit = json.dumps(node.scc_id)
+        mods_lit = json.dumps(list(node.modules))
+        cyc_lit = "true" if node.is_cyclic else "false"
+        lines.append(
+            f"MERGE (n:CondensationNode {{scc_id: {scc_lit}}}) "
+            f"SET n.wave = {node.wave}, n.is_cyclic = {cyc_lit}, "
+            f"n.total_tokens = {node.total_tokens}, n.modules = {mods_lit};"
+        )
+    for node in plan.condensation_nodes:
+        src_lit = json.dumps(node.scc_id)
+        for dep_id in node.depends_on_sccs:
+            dst_lit = json.dumps(dep_id)
+            lines.append(
+                f"MATCH (a:CondensationNode {{scc_id: {src_lit}}}), "
+                f"(b:CondensationNode {{scc_id: {dst_lit}}}) "
+                f"MERGE (a)-[:DEPENDS_ON]->(b);"
+            )
+    return "\n".join(lines)
+
+
+def render_agent_action_plan_markdown(
+    scan_summary: ScanSummary,
+    plan: ModernizationPlan,
+    token_budget: int = 16000,
+) -> str:
+    """Render a human-in-the-loop Technical Specification and Agent Action Plan gate in Markdown."""
+    valid_budget = validate_token_budget(token_budget)
+    pruned_count = sum(1 for f in scan_summary.files if f.disposition == "PRUNED_BLOAT")
+    quarantined_files = [
+        f.rel_path for f in scan_summary.files if f.disposition == "QUARANTINED_DLP"
+    ]
+    active_count = sum(1 for f in scan_summary.files if f.disposition == "ACTIVE_SOURCE")
+
+    out: list[str] = [
+        "# Pre-Execution Technical Specification & Agent Action Plan",
+        "",
+        "## 1. Repository Ingestion & Context Reduction Summary",
+        f"- **Active Source Modules:** {active_count} files ({scan_summary.active_tokens:,} tokens)",
+        f"- **Pruned Bloat Artifacts:** {pruned_count} files ({scan_summary.pruned_tokens:,} tokens)",
+        f"- **Context Reduction Ratio:** {scan_summary.token_reduction_ratio * 100:.2f}%",
+        f"- **DLP Quarantined Files:** {len(quarantined_files)} ({scan_summary.quarantined_tokens:,} tokens)",
+        f"- **Recommended Directory Exclusions:** {', '.join(scan_summary.recommended_exclusions) or 'None'}",
+        f"- **Circular Dependency Knots (Tarjan SCCs):** {plan.cyclic_knot_count}",
+        f"- **Bottom-Up Modernization Waves:** {plan.max_wave_depth + 1 if plan.condensation_nodes else 0} (Waves 0..{plan.max_wave_depth})",
+        f"- **Per-Agent Slice Token Ceiling:** {valid_budget:,} tokens",
+        "",
+        "## 2. Wave-Ordered Parallel Agent Swarm Schedule",
+    ]
+
+    if quarantined_files:
+        out.append("")
+        out.append("### Pre-Flight Security Gate: Quarantined DLP Files")
+        for q_path in quarantined_files:
+            out.append(f"- `{q_path}` (blocked from agent context)")
+
+    waves: dict[int, list[ModernizationSlice]] = {}
+    for sl in plan.slices:
+        waves.setdefault(sl.wave, []).append(sl)
+
+    for w in sorted(waves.keys()):
+        w_slices = waves[w]
+        ready_agents = sum(1 for s in w_slices if s.status == "READY")
+        blocked_knots = sum(1 for s in w_slices if s.status == "OVERSIZED_COUPLED_KNOT")
+        out.append("")
+        out.append(
+            f"### Wave {w} (Max Parallel Agent Workers: {ready_agents} | "
+            f"Human Seam-Carving Gates: {blocked_knots})"
+        )
+        for sl in w_slices:
+            mods_str = ", ".join(f"`{m}`" for m in sl.modules)
+            out.append(
+                f"- **{sl.slice_id}** [{sl.status}] ({sl.total_tokens:,} / {valid_budget:,} tokens): {mods_str}"
+            )
+
+    return "\n".join(out)
+

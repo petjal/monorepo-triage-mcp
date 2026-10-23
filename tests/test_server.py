@@ -91,6 +91,10 @@ class TestTriageAndPlanRepositoryTool:
 
         assert "scan_summary" in res
         assert "modernization_plan" in res
+        assert "agent_action_plan_markdown" in res
+        assert "neo4j_knowledge_graph_cypher" in res
+        assert "MERGE (n:CondensationNode" in res["neo4j_knowledge_graph_cypher"]
+        assert "Wave-Ordered Parallel Agent Swarm Schedule" in res["agent_action_plan_markdown"]
 
         scan = res["scan_summary"]
         plan = res["modernization_plan"]

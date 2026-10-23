@@ -3,7 +3,9 @@
 from monorepo_triage.layer1_scanner import FileRecord, ScanSummary
 from monorepo_triage.layer2_slice_planner import (
     build_modernization_plan,
+    export_neo4j_cypher,
     plan_from_scan,
+    render_agent_action_plan_markdown,
 )
 
 
@@ -519,5 +521,50 @@ class TestAuditRound2Layer2:
         single_node = next(n for n in plan.condensation_nodes if not n.is_cyclic)
         assert single_node.modules == ("a+b",)
         assert single_node.wave == 1
+
+    def test_neo4j_cypher_export_and_agent_action_plan_markdown(self) -> None:
+        """Verify Neo4j Cypher knowledge graph export and Markdown Agent Action Plan gate."""
+        files = (
+            FileRecord(
+                rel_path="src/db.py",
+                module_id="src.db",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=800,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=(),
+            ),
+            FileRecord(
+                rel_path="src/api.py",
+                module_id="src.api",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=1200,
+                shannon_entropy=4.1,
+                max_line_length=70,
+                imports=("db",),
+            ),
+        )
+        scan = ScanSummary(
+            root_path="/tmp/fake_repo",
+            files=files,
+            active_tokens=2000,
+            pruned_tokens=5000,
+            quarantined_tokens=0,
+            token_reduction_ratio=0.7143,
+            symlink_loops_skipped=(),
+            recommended_exclusions=("node_modules",),
+        )
+        plan = plan_from_scan(scan, token_budget=16000)
+        cypher = export_neo4j_cypher(plan)
+        assert 'MERGE (n:CondensationNode {scc_id: "src.db"})' in cypher
+        assert 'MERGE (a)-[:DEPENDS_ON]->(b);' in cypher
+
+        md = render_agent_action_plan_markdown(scan, plan, token_budget=16000)
+        assert "# Pre-Execution Technical Specification & Agent Action Plan" in md
+        assert "### Wave 0 (Max Parallel Agent Workers: 1" in md
+        assert "### Wave 1 (Max Parallel Agent Workers: 1" in md
+
 
 

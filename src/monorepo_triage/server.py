@@ -14,7 +14,9 @@ from monorepo_triage.layer0_invariants import (
 from monorepo_triage.layer1_scanner import scan_repository
 from monorepo_triage.layer2_slice_planner import (
     build_modernization_plan,
+    export_neo4j_cypher,
     plan_from_scan,
+    render_agent_action_plan_markdown,
 )
 
 mcp = FastMCP("monorepo-triage-mcp")
@@ -28,7 +30,7 @@ def triage_and_plan_repository(
     entropy_threshold: float = 5.2,
     include_pruned_files: bool = False,
 ) -> dict[str, Any]:
-    """Scan and triage a repository, returning bloat analysis and wave-ordered modernization slices."""
+    """Scan and triage a repository, returning bloat analysis, wave-ordered slices, Neo4j Cypher, and an Agent Action Plan."""
     path = Path(repo_path)
     if not path.exists():
         raise ValueError(f"Repository path does not exist: {repo_path}")
@@ -45,6 +47,10 @@ def triage_and_plan_repository(
         entropy_threshold=valid_entropy,
     )
     plan = plan_from_scan(scan_summary, token_budget=valid_budget)
+    action_plan_md = render_agent_action_plan_markdown(
+        scan_summary, plan, token_budget=valid_budget
+    )
+    neo4j_cypher = export_neo4j_cypher(plan)
 
     scan_dict = asdict(scan_summary)
     pruned_count = sum(1 for f in scan_summary.files if f.disposition == "PRUNED_BLOAT")
@@ -57,6 +63,8 @@ def triage_and_plan_repository(
     return {
         "scan_summary": scan_dict,
         "modernization_plan": asdict(plan),
+        "agent_action_plan_markdown": action_plan_md,
+        "neo4j_knowledge_graph_cypher": neo4j_cypher,
     }
 
 
