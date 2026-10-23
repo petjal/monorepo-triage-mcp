@@ -4,6 +4,11 @@ A deterministic legacy codebase pre-flight inspector, bloat pruner, Neo4j knowle
 
 This is a portfolio demonstration illustrating field-deployed repository triage, knowledge-graph extraction, and deterministic context partitioning.
 
+> **Repository Document Map (Tool vs. External Case Studies vs. Internal QA):**
+> 1. **[`README.md`](https://github.com/petjal/monorepo-triage-mcp/blob/master/README.md) (This Document — The Tool):** Architecture, algorithms, and usage of the `monorepo-triage-mcp` server.
+> 2. **[`CASE_STUDIES.md`](https://github.com/petjal/monorepo-triage-mcp/blob/master/CASE_STUDIES.md) (Assessing External Codebases *With* the Tool):** Plain-English executive brief and technical pre-flight findings generated **by** `monorepo-triage-mcp` when scanning **`trpc/trpc`** (Green Light: 100% Swarm-Ready) and **`django/django`** (Yellow Light: 153-Module / 628K-Token Core Hairball at Wave 5) in preparation for a large-scale AI modernization project.
+> 3. **[`VERIFICATION_LOG.md`](https://github.com/petjal/monorepo-triage-mcp/blob/master/VERIFICATION_LOG.md) (Auditing *Our Own* Source Code):** Multi-round cold-context adversarial red-teaming, 19 defect remediations, 74-test regression suite, and Linux cgroup telemetry of `monorepo-triage-mcp`'s own Python codebase.
+
 ## Background
 
 When pointing an automated scanner or an autonomous coding agent at a large enterprise repository, the pipeline rarely fails on language syntax. It fails on **repository pathology**:

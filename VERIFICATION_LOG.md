@@ -4,6 +4,10 @@
 **Workflow:** Spec-Driven Working Prototype -> Cold-Context Adversarial Red-Teaming & Systems Telemetry -> Regression Test Hardening  
 **Verification Baseline:** 74 passing unit tests (`pytest`), strict static typing (`mypy --strict`), zero lint violations (`ruff`)
 
+> **Reader Orientation (Internal Code QA vs. External Case Studies):**
+> * **This document (`VERIFICATION_LOG.md`)** records the adversarial code audits, 74-test regression suite, and systems performance profiling of **`monorepo-triage-mcp`'s own Python source code**.
+> * For sample pre-flight assessment reports of **external repositories (`trpc/trpc` and `django/django`)** generated **by** this tool (written for project sponsors and engagement architects), see **[`CASE_STUDIES.md`](https://github.com/petjal/monorepo-triage-mcp/blob/master/CASE_STUDIES.md)**.
+
 ---
 
 ## 1. Why We Used "Prototype -> Adversarial Breaker -> Regression Tests" Instead of Pure Test-First TDD
