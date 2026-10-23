@@ -1,6 +1,7 @@
 """Tests for Layer 3: FastMCP Tool Registration and End-to-End Monorepo Triage Service."""
 
 import asyncio
+import importlib.util
 from pathlib import Path
 from typing import Any
 
@@ -138,3 +139,27 @@ class TestTriageAndPlanRepositoryTool:
             assert plan["total_active_tokens"] == 2000
 
         asyncio.run(call())
+
+    def test_enterprise_sprint_demo_end_to_end(self) -> None:
+        demo_path = Path(__file__).resolve().parent.parent / "examples" / "run_django_sprint_demo.py"
+        spec = importlib.util.spec_from_file_location("run_django_sprint_demo", demo_path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        result: dict[str, Any] = module.run_enterprise_sprint_demo()
+        assert result["stage1_preflight_summary"]["active_source_files"] == 7
+        assert result["stage1_preflight_summary"]["cyclic_knots_detected_before"] == 1
+        assert result["stage1_preflight_summary"]["total_waves"] == 4
+        # Stage 2.5 counterfactual: out-of-order execution fails real mypy --strict
+        assert result["stage2_5_out_of_order_counterfactual"]["mypy_strict_passed"] is False
+        # Stage 3 bottom-up execution: all 4 waves pass real mypy --strict and cycle drops 1 -> 0
+        s3 = result["stage3_autonomous_80_pct_execution"]
+        assert s3["before_typed_functions"] == "0/11 (0%)"
+        assert s3["after_typed_functions"] == "11/11 (100%)"
+        assert s3["cyclic_knots_after_stage3"] == 0
+        assert s3["waves_preserved_after_stage3"] == 4
+        assert len(s3["waves_executed"]) == 4
+        assert all(w["judge_mypy_strict_passed"] is True for w in s3["waves_executed"])
+        assert len(result["stage4_human_20_pct_handoff"]) == 3
+

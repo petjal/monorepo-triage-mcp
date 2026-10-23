@@ -2,10 +2,10 @@
 
 **System:** Deterministic Legacy Repository Pre-Flight Inspector, Neo4j Graph Exporter & Topological Slice Planner (FastMCP)  
 **Workflow:** Spec-Driven Working Prototype -> Cold-Context Adversarial Red-Teaming & Systems Telemetry -> Regression Test Hardening  
-**Verification Baseline:** 74 passing unit tests (`pytest`), strict static typing (`mypy --strict`), zero lint violations (`ruff`)
+**Verification Baseline:** 75 passing unit tests (`pytest`), strict static typing (`mypy --strict`), zero lint violations (`ruff`)
 
 > **Reader Orientation (Internal Code QA vs. External Case Studies):**
-> * **This document (`VERIFICATION_LOG.md`)** records the adversarial code audits, 74-test regression suite, and systems performance profiling of **`monorepo-triage-mcp`'s own Python source code**.
+> * **This document (`VERIFICATION_LOG.md`)** records the adversarial code audits, 75-test regression suite, and systems performance profiling of **`monorepo-triage-mcp`'s own Python source code**.
 > * For sample pre-flight assessment reports of **external repositories (`trpc/trpc` and `django/django`)** generated **by** this tool (written for project sponsors and engagement architects), see **[`CASE_STUDIES.md`](https://github.com/petjal/monorepo-triage-mcp/blob/master/CASE_STUDIES.md)**.
 
 ---
@@ -18,8 +18,8 @@ In AI-assisted software engineering, naive single-agent "TDD" has an even sharpe
 
 This repository demonstrates that failure mode empirically, and how to fix it:
 1. **Stage 1 (Working Prototype):** I defined the 4-layer architecture and operational invariants from 16 years of diagnosing enterprise source code scanners (`bds_bom_Partition`). A fast code-synthesis model built the working prototype and 48 unit tests. All 48 tests passed (`100% green`), `mypy --strict` passed, and `ruff` passed.
-2. **Stage 2 (Cold-Context Adversarial Breaker & Live Monorepo Telemetry):** Rather than trusting the 48 green happy-path tests, I ran three rounds of cold-context adversarial auditing (executing live Python breakage probes from isolated models with zero build-session context) and profiled the tool against `django/django` (7,114 files) and `trpc/trpc` (+ 4,000 `node_modules` files). That process exposed **19 concrete defects and systems bottlenecks**.
-3. **Stage 3 (Real Regression TDD Around a Working Tool):** With a working nascent tool in hand and 19 concrete failure probes identified, we wrote failing regression tests reproducing each bug before implementing the fixes, bringing the final test suite to **74 passing unit tests**.
+2. **Stage 2 (Cold-Context Adversarial Breaker & Live Monorepo Telemetry):** Rather than trusting the 48 green happy-path tests, I ran four rounds of cold-context adversarial auditing (executing live Python breakage probes from isolated models with zero build-session context) and profiled the tool against `django/django` (7,114 files) and `trpc/trpc` (+ 4,000 `node_modules` files). That process exposed **19 core engine defects/bottlenecks plus 5 simulation shortcuts in the runnable sprint demo**.
+3. **Stage 3 (Real Regression TDD Around a Working Tool):** With a working nascent tool in hand and concrete failure probes identified, we wrote failing regression tests reproducing each bug before implementing the fixes, bringing the final test suite to **75 passing unit tests**.
 
 ---
 
@@ -111,7 +111,29 @@ This repository demonstrates that failure mode empirically, and how to fix it:
 
 ---
 
-## 5. Layer-by-Layer Verification Architecture
+## 5. Round 4 Dual Cold-Context Audit of `examples/run_django_sprint_demo.py` (5 Catches)
+
+Two independent cold-context reviewer models were spawned to verify that the runnable 80/20 enterprise sprint demo (`examples/run_django_sprint_demo.py` and `CASE_STUDIES.md` Section 4) contained zero misleading claims or theatrical shortcuts:
+
+### Catch 20: Single-File AST Judge vs. Real `mypy --strict` & Unused `F401` Imports
+* **The Defect:** The initial `run_django_sprint_demo.py` claimed to verify `mypy --strict` readiness using only single-file `ast.parse` signature inspection, and its simulated Django files contained decorative top-level imports (`F401` unused imports) that were never called at runtime. Because the AST check ran in single-file isolation, executing Wave 3 *before* Wave 0 still passed the fake judge, failing to prove why bottom-up wave ordering is necessary.
+* **The Remediation:** Made every import across all 7 simulated Django files genuinely called at runtime (`0` `ruff` violations on the simulated files), replaced the single-file check with real `mypy.api.run(["--strict", "--explicit-package-bases", ...])` at every wave, and added **Stage 2.5 (Out-of-Order Counterfactual Proof)** demonstrating that running `mypy --strict` on Wave 2 (`validators.py`) *before* Wave 0/1 are modernized fails (`Found 14 errors in 5 files`).
+
+### Catch 21: Non-Existent Django `DateTimeRangeField(timezone_aware=None)` Parameter
+* **The Defect:** The initial demo used `DateTimeRangeField(timezone_aware=None)` for its 20% human policy gate, which is not a real parameter on `django.contrib.postgres.fields.ranges.DateTimeRangeField` (it subclasses `ContinuousRangeField` and takes `default_bounds="[)"`).
+* **The Remediation:** Replaced with authentic `DateTimeRangeField(default_bounds="[)")` and framed the 20% human policy gate around degenerate `lower == upper` bounds under exclusive `default_bounds="[)"`.
+
+### Catch 22: Post-Sprint Rescan Wave Collapse & Unbroken `TYPE_CHECKING` Cycle
+* **The Defect:** In the initial Wave 1 patch, `functional.py` accidentally dropped `from django.utils import regex_helper` (collapsing the post-sprint graph from 4 waves to 3 waves) while keeping `from django.utils import deprecation` inside `if TYPE_CHECKING:` (which static AST import extraction still treats as a cycle).
+* **The Remediation:** Preserved `from django.utils import regex_helper` in `functional.py` and decoupled `functional.unwrap_or_warn` from `deprecation.warn_legacy_arg`, verified via a post-sprint `scan_repository` + `plan_from_scan` rescan showing `cyclic_knot_count` dropping from `1 -> 0` while preserving all `4` waves (`0..3`).
+
+### Catch 23: Brittle `scc_id` `"+"` Substring Check & Explicit Offline Replay Disclosure
+* **The Defect:** `run_django_sprint_demo.py` checked `sl.scc_ids[0].find("+") != -1` instead of `CondensationNode.is_cyclic`, and `CASE_STUDIES.md` listed `84.96%` from an earlier 3-wave run.
+* **The Remediation:** Queried `CondensationNode.is_cyclic` directly, renamed the patch dictionary to `OFFLINE_WAVE_REPLAY_PATCHES` with an explicit `execution_mode_disclosure` field, synchronized all metrics in `CASE_STUDIES.md` and `README.md`, and locked the entire end-to-end sprint demo into `tests/test_server.py::test_enterprise_sprint_demo_end_to_end`.
+
+---
+
+## 6. Layer-by-Layer Verification Architecture
 
 ```text
 +-----------------------------------------------------------------------------------+
@@ -142,4 +164,4 @@ This repository demonstrates that failure mode empirically, and how to fix it:
 | **Layer 0 (`layer0_invariants.py`)** | Rejects `bool`, `NaN`/`Inf`, path traversal (`..`/external symlinks), and negative module weights | `tests/test_layer0_invariants.py` (22 tests) | 100% pass |
 | **Layer 1 (`layer1_scanner.py`)** | Zero-read bloat pruning (`packages/web/node_modules`); skips all symlinks; prunes binary/unreadable/generated/minified files; quarantines PEM/AWS/GH secrets; linear-time comment/string-safe AST & lexical import extraction | `tests/test_layer1_scanner.py` (24 tests) | 100% pass |
 | **Layer 2 (`layer2_slice_planner.py`)** | Iterative Tarjan SCCs + iterative wave assignment on 1,200-node deep chains; locality-aware polyglot resolution across Python `__init__.py`, TypeScript `index.ts`, Go package dirs, and microservice `src/` roots; fast FFD slice packing; exports Neo4j Cypher & Markdown Action Plan | `tests/test_layer2_slice_planner.py` (21 tests) | 100% pass |
-| **Layer 3 (`server.py`)** | End-to-end MCP tool registration, `pruned_file_count`, Neo4j Cypher, and Action Plan output | `tests/test_server.py` (7 tests) | 100% pass |
+| **Layer 3 (`server.py` & `examples/`)** | End-to-end MCP tool registration, `pruned_file_count`, Neo4j Cypher, Action Plan output, and runnable 80/20 Django Sprint Demo with live `mypy --strict` Judge | `tests/test_server.py` (8 tests) | 100% pass |

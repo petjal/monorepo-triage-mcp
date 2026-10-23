@@ -65,18 +65,19 @@ Running `triage_and_plan_repository` on this repository itself (`token_budget=60
 
 ```json
 {
-  "active_files_returned": 9,
-  "pruned_file_count": 176,
+  "active_files_returned": 10,
+  "pruned_file_count": 254,
   "quarantined_tokens": 0,
   "max_wave_depth": 4,
   "waves": {
-    "src.monorepo_triage.layer0_invariants": 0,
     "src.monorepo_triage": 0,
+    "src.monorepo_triage.layer0_invariants": 0,
     "src.monorepo_triage.layer1_scanner": 1,
     "tests.test_layer0_invariants": 1,
     "tests.test_layer1_scanner": 2,
     "src.monorepo_triage.layer2_slice_planner": 2,
     "tests.test_layer2_slice_planner": 3,
+    "examples.run_django_sprint_demo": 3,
     "src.monorepo_triage.server": 3,
     "tests.test_server": 4
   }
@@ -100,7 +101,7 @@ Asking a single LLM session to practice strict "Test-First TDD" is mostly theate
 Instead, this repository was built in three distinct stages:
 1. **Working Nascent Prototype:** I specified the 4-layer architecture and domain invariants from my Black Duck field experience, and directed a fast code-generation model to build a working prototype with 48 baseline unit tests.
 2. **Cold-Context Adversarial Red-Teaming & Live Repo Profiling:** Once the nascent tool was running, I spawned isolated, zero-context reviewer models tasked strictly with breaking the working code via live Python probes and profiled full-stack system telemetry (`/proc/self/io`, `/proc/self/status`, `cProfile`) against `django/django` and `trpc/trpc`. Across three adversarial rounds, that process uncovered **19 real defects and systems bottlenecks** that passed the original 48 happy-path tests (including full disk reads on pruned `node_modules` files, $O(L^3)$ TypeScript regex backtracking, $O(K^2 \log K)$ FFD tuple re-sorting, cross-service microservice alias collisions, false Python `__init__.py` cycles on PEP 8 imports, Go package directory resolution failures, TypeScript `index.ts` barrel blindspots, backtick comment corruption, symlink shadowing, and `scc_id` delimiter collisions).
-3. **Regression Test Hardening:** Each concrete failure mode was turned into a failing regression test first and then fixed, expanding the suite to **74 passing unit tests**.
+3. **Regression Test Hardening:** Each concrete failure mode was turned into a failing regression test first and then fixed, expanding the suite to **75 passing unit tests**.
 
 For the complete defect log, benchmark telemetry, and architectural breakdown, see [VERIFICATION_LOG.md](https://github.com/petjal/monorepo-triage-mcp/blob/master/VERIFICATION_LOG.md).
 
@@ -108,7 +109,8 @@ For the complete defect log, benchmark telemetry, and architectural breakdown, s
 
 ```bash
 PYTHONPATH=src python3 -m pytest -q
-PYTHONPATH=src python3 -m mypy --strict src tests
-ruff check src tests
+PYTHONPATH=src python3 -m mypy --strict src tests examples/run_django_sprint_demo.py
+ruff check src tests examples/run_django_sprint_demo.py
+PYTHONPATH=src python3 examples/run_django_sprint_demo.py
 PYTHONPATH=src python3 -m monorepo_triage.server
 ```

@@ -81,24 +81,30 @@ Instead, the pre-flight report prescribes a concrete **3-Phase Execution Plan**:
 
 ## 4. Runnable End-to-End "80/20" Enterprise Sprint PoC (`examples/run_django_sprint_demo.py`)
 
-To demonstrate how the pre-flight scan connects to an actual **80% Autonomous / 20% Human** enterprise sprint, this repository includes a self-contained runnable simulation ([`examples/run_django_sprint_demo.py`](https://github.com/petjal/monorepo-triage-mcp/blob/master/examples/run_django_sprint_demo.py)):
+To demonstrate how the pre-flight scan connects to an **80% Autonomous / 20% Human** enterprise sprint without requiring external LLM API keys, this repository includes a self-contained runnable script ([`examples/run_django_sprint_demo.py`](https://github.com/petjal/monorepo-triage-mcp/blob/master/examples/run_django_sprint_demo.py)):
 
 ```bash
 PYTHONPATH=src python3 examples/run_django_sprint_demo.py
 ```
 
-### The Simulated Sprint Scenario ("Sprint 42: Strict Type Modernization")
-A customer wants to modernize a legacy untyped Django subsystem (`django.utils` $\rightarrow$ `django.core.validators` $\rightarrow$ `django.contrib.postgres.fields`) to 100% PEP 484 type annotations so their CI pipeline can enforce `mypy --strict`:
+> **Live Engine vs. Offline Wave Replay Disclosure:** Stages 1, 2, 2.5, the per-wave `mypy --strict` Judge, and the post-sprint graph rescan all execute live (`monorepo-triage-mcp` + `mypy.api.run`). Stage 3 replays deterministic pre-computed wave patches (`OFFLINE_WAVE_REPLAY_PATCHES`) in the computed bottom-up wave order so any reviewer can run the script offline in ~1 second with zero API keys.
 
-1. **Stage 1 & 2 — Pre-Flight Triage & Wave Blueprint (`monorepo-triage-mcp`):**
-   * Prunes `84.96%` of dead-weight tokens (`node_modules/admin-ui/bundle.js`).
-   * Quarantines a legacy RSA private key (`tests/postgres_tests/legacy_test_key.pem`) via the Layer 1 DLP gate before any code reaches an LLM.
-   * Detects the circular dependency knot between `django.utils.functional` and `django.utils.deprecation` at **Wave 1** and schedules a 4-wave bottom-up execution plan (`Wave 0` leaf utilities $\rightarrow$ `Wave 1` coupled knot $\rightarrow$ `Wave 2` core validators $\rightarrow$ `Wave 3` Postgres fields).
-2. **Stage 3 — The Autonomous "80%" Wave Swarm + Isolated Judge Pass:**
-   * Executes Wave 0 through Wave 3 in strict bottom-up order. At Wave 1, the autonomous worker carves a `from __future__ import annotations` + `if TYPE_CHECKING:` seam to break the circular type dependency between `functional.py` and `deprecation.py`.
-   * At the end of each wave, an isolated AST Judge verifies that 100% of functions and methods (`10/10`) carry complete parameter and return type annotations before unlocking the next wave.
-3. **Stage 4 — The "Final 20%" Human Engineer Last-Mile Handoff:**
+### The Simulated Sprint Scenario ("Sprint 42: Strict Type Modernization")
+A customer wants to modernize a 7-module legacy untyped Django subsystem (`django.utils` $\rightarrow$ `django.core.validators` $\rightarrow$ `django.contrib.postgres.fields`) to 100% PEP 484 type annotations so their CI pipeline can enforce `mypy --strict`:
+
+1. **Stage 1 & 2 — Live Pre-Flight Triage & Wave Blueprint (`monorepo-triage-mcp`):**
+   * Prunes `79.28%` of non-source tokens (`2,286` pruned bloat tokens in `node_modules/admin-ui/bundle.js` + `25` quarantined DLP tokens vs. `604` active Python tokens across 7 modules).
+   * Quarantines a legacy RSA private key (`tests/postgres_tests/legacy_test_key.pem`) via the Layer 1 DLP gate before any code reaches an agent context window.
+   * Detects the circular dependency knot between `django.utils.functional` and `django.utils.deprecation` at **Wave 1** (`CondensationNode.is_cyclic == True`) and schedules a 4-wave bottom-up execution plan (`Wave 0` leaf utilities $\rightarrow$ `Wave 1` coupled knot $\rightarrow$ `Wave 2` core validators $\rightarrow$ `Wave 3` Postgres fields).
+2. **Stage 2.5 — Live Out-of-Order Counterfactual Proof (`mypy --strict` Failure):**
+   * Before running bottom-up waves, the script applies the modernized Wave 2 patch (`django/core/validators.py`) *out of order* (while Wave 0 and Wave 1 remain untyped) and invokes real `mypy --strict`.
+   * **Physical Result:** `mypy --strict` fails (`Found 14 errors in 5 files`), proving why top-down or random-order agent execution breaks strict type-checking across dependent modules.
+3. **Stage 3 — Bottom-Up Wave Replay + Real `mypy --strict` Judge + Post-Sprint Rescan:**
+   * Replays Wave 0 through Wave 3 in strict bottom-up order. At Wave 1, `functional.unwrap_or_warn` decouples its back-edge to `deprecation.warn_legacy_arg`, breaking the circular dependency knot while preserving the 4-wave hierarchy (`Waves 0..3`).
+   * At the end of each wave, the isolated Judge runs both AST signature verification (`11/11` functions/methods typed) and real `mypy --strict` (`Success: no issues found in 2/4/5/7 source files`) before unlocking the next wave.
+   * Re-running `scan_repository` + `plan_from_scan` on the modernized workspace confirms `cyclic_knot_count` dropped from `1` $\rightarrow$ `0` across all `4` preserved waves.
+4. **Stage 4 — The "Final 20%" Human Engineer Last-Mile Handoff:**
    * Rather than guessing on ambiguous business logic or touching quarantined secrets, the pipeline outputs a structured 3-item handoff manifest for the customer's human engineers:
-     * **Domain Policy Decision (`django/contrib/postgres/fields/ranges.py`):** Confirm whether `DateTimeRangeField(timezone_aware=None)` should raise `ValidationError` when `USE_TZ=False`.
+     * **Domain Policy Decision (`django/contrib/postgres/fields/ranges.py`):** Confirm whether `DateTimeRangeField.validate_bounds` under exclusive `default_bounds='[)'` should raise `django.core.exceptions.ValidationError` or coerce to an empty range when `lower == upper`.
      * **DLP Secret Rotation (`tests/postgres_tests/legacy_test_key.pem`):** Replace the quarantined static RSA private key with an ephemeral runtime test fixture.
-     * **Architectural Seam Sign-Off (`functional.py <-> deprecation.py`):** Verify no external plugins rely on implicit runtime re-export attributes across the refactored Wave 1 knot.
+     * **Architectural Seam Sign-Off (`functional.py <-> deprecation.py`):** Confirm whether any external callers rely on the legacy `RemovedInNextVersionWarning` string prefix after decoupling `functional.unwrap_or_warn`.
