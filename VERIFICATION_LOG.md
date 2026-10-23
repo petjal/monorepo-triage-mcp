@@ -1,8 +1,8 @@
 # Verification & Adversarial Audit Log: `monorepo-triage-mcp`
 
 **System:** Deterministic Legacy Repository Pre-Flight Inspector, Neo4j Graph Exporter & Topological Slice Planner (FastMCP)  
-**Workflow:** Spec-Driven Working Prototype -> Cold-Context Adversarial Red-Teaming -> Regression Test Hardening  
-**Verification Baseline:** 65 passing unit tests (`pytest`), strict static typing (`mypy --strict`), zero lint violations (`ruff`)
+**Workflow:** Spec-Driven Working Prototype -> Cold-Context Adversarial Red-Teaming & Systems Telemetry -> Regression Test Hardening  
+**Verification Baseline:** 74 passing unit tests (`pytest`), strict static typing (`mypy --strict`), zero lint violations (`ruff`)
 
 ---
 
@@ -14,8 +14,8 @@ In AI-assisted software engineering, naive single-agent "TDD" has an even sharpe
 
 This repository demonstrates that failure mode empirically, and how to fix it:
 1. **Stage 1 (Working Prototype):** I defined the 4-layer architecture and operational invariants from 16 years of diagnosing enterprise source code scanners (`bds_bom_Partition`). A fast code-synthesis model built the working prototype and 48 unit tests. All 48 tests passed (`100% green`), `mypy --strict` passed, and `ruff` passed.
-2. **Stage 2 (Cold-Context Adversarial Breaker):** Rather than trusting the 48 green happy-path tests, I ran two rounds of cold-context adversarial auditing (including 12 live Python breakage probes executed by an isolated model with zero build-session context). The breaker immediately broke the "100% green" prototype in **11 places**.
-3. **Stage 3 (Real Regression TDD Around a Working Tool):** With a working nascent tool in hand and 11 concrete failure probes identified, we wrote failing regression tests reproducing each bug before implementing the fixes, bringing the final test suite to 65 tests.
+2. **Stage 2 (Cold-Context Adversarial Breaker & Live Monorepo Telemetry):** Rather than trusting the 48 green happy-path tests, I ran three rounds of cold-context adversarial auditing (executing live Python breakage probes from isolated models with zero build-session context) and profiled the tool against `django/django` (7,114 files) and `trpc/trpc` (+ 4,000 `node_modules` files). That process exposed **19 concrete defects and systems bottlenecks**.
+3. **Stage 3 (Real Regression TDD Around a Working Tool):** With a working nascent tool in hand and 19 concrete failure probes identified, we wrote failing regression tests reproducing each bug before implementing the fixes, bringing the final test suite to **74 passing unit tests**.
 
 ---
 
@@ -71,7 +71,43 @@ This repository demonstrates that failure mode empirically, and how to fix it:
 
 ---
 
-## 4. Layer-by-Layer Verification Architecture
+## 4. Round 3 Cold-Context Audit & Systems Telemetry Catches (8 Defects & Bottlenecks)
+
+### Catch 12 (P0-A): Full Disk Reads & Shannon Entropy on Pruned `BLOAT_DIR_NAMES` Files (`layer1_scanner.py`)
+* **The Defect:** Although `BLOAT_DIR_NAMES` (`node_modules`, `.git`, `vendor`) was checked first, lines 270–272 still executed `file_path.read_bytes()`, `.decode("utf-8")`, `estimate_source_tokens()`, and `shannon_entropy_bits_per_byte()` on every pruned file `<= 2 MB`, and `collect_files` invoked `Path.relative_to()` 24,636 times on a 7,114-file repo.
+* **The Remediation:** Replaced `Path.iterdir()` + `Path.relative_to()` with `os.scandir()` passing `rel_prefix` strings and cached `DirEntry.stat(follow_symlinks=False)`. Files inside `BLOAT_DIR_NAMES` now compute `estimated_tokens = max(1, math.ceil(file_size / 3.5))` directly from `st_size` with **zero `open()`/`read()` syscalls** and `shannon_entropy=0.0`. On `trpc/trpc` (+4,000 `node_modules` files), kernel read syscalls dropped by **71.0%** (`11,373` $\rightarrow$ `3,300`), VFS bytes read dropped by **85.2%** (`48.30 MB` $\rightarrow$ `7.16 MB`), and wall-clock scan time dropped by **7.7x** (`2,137 ms` $\rightarrow$ `270 ms`).
+
+### Catch 13 (P0-B): Catastrophic $O(L^3)$ Regex Backtracking (ReDoS) in `extract_ts_js_imports` (`layer1_scanner.py`)
+* **The Defect:** The pattern `(?:import|export)\s+[\w$\s{},*]+\s+from` had three adjacent quantifiers matching whitespace (`\s`). When a 25 KB TypeScript file contained `export` followed by 600 indented comment lines (which comment stripping replaced with whitespace runs) and no `from`, Python's regex engine stalled for **7,140.39 ms**.
+* **The Remediation:** Replaced the ambiguous `[\w$\s{},*]+` quantifier with a structured, zero-backtracking ES6/TS clause (`(?:\*\s+as\s+[\w$]+|[\w$]+(?:\s*,\s*(?:\*\s+as\s+[\w$]+|\{[^}]*\}))?|\{[^}]*\}|\*)`), dropping execution time on the 25 KB stress payload from **7,140.39 ms to 0.58 ms** (a **12,311x speedup**).
+
+### Catch 14 (P0-C): $O(K^2 \log K)$ Repeated Tuple Re-Sorting Inside FFD Slice Packer & AST Expression Walking (`layer2_slice_planner.py`, `layer1_scanner.py`)
+* **The Defect:** (1) Inside the FFD bin-packing loop, `tuple(sorted(s.modules + node.modules))` re-allocated and re-sorted the tuple on every insertion, taking **5,181.13 ms** for 20,000 leaf modules. (2) In `extract_python_imports`, `ast.walk(tree)` traversed 4.83 million expression nodes across `django/django`.
+* **The Remediation:** (1) Replaced immutable tuple re-sorting inside the FFD loop with `_MutableSliceBin` list accumulation + capacity pruning (`valid_budget - b.total_tokens < min_wave_tokens`), sorting once per slice at the end of each wave (**5,181.13 ms $\rightarrow$ 97.44 ms**, a **53.2x speedup**). (2) Replaced `ast.walk(tree)` with statement-container traversal (`body`, `orelse`, `finalbody`, `handlers`, `cases`), skipping expression subtrees while extracting 100% identical AST imports (`11,980` across `django/django`).
+
+### Catch 15 (P0-1): False Cross-Service Circular Dependency Knots in Multi-Package Monorepos (`layer2_slice_planner.py`)
+* **The Defect:** `plan_from_scan` stripped `src.` into a global `alias_to_targets` map without considering package locality. When two independent microservices (`services/auth/src/{db,api}.py` and `services/billing/src/{db,api}.py`) used local imports (`import db` in `auth/src/api.py`, `import api` in `billing/src/db.py`), `_resolve_import_targets` linked both services together into a false circular dependency knot (`services.auth.src.api+services.billing.src.db`).
+* **The Remediation:** Added `_filter_by_locality` in `_resolve_import_targets` to score candidate targets by shared leading package segments with `self_mod_id`, resolving ambiguous aliases strictly to the closest enclosing service/package root, and prevented Go files from importing their own package directory (`self_mod_id in go_dir_to_modules[sub_dir]`).
+
+### Catch 16 (P0-2): False Python `__init__.py` Circular Knots on PEP 8 Absolute Imports (`layer1_scanner.py` & `layer2_slice_planner.py`)
+* **The Defect:** While Round 2 fixed `from . import models` (`node.module is None`), a PEP 8 absolute import `from pkg import models` (`node.module == "pkg"`) inside `pkg/service.py` still emitted `"pkg"` (`base_mod`), forming a false `pkg+pkg.service` cycle whenever `pkg/__init__.py` re-exported from `pkg.service`. On `django/django`, this inflated the core `django` knot to 180 modules.
+* **The Remediation:** Omitted `base_mod` in `extract_python_imports` whenever `base_parts` is an ancestor prefix of `parent_parts` (unless importing `*`), and guarded direct/alias resolution in `_resolve_import_targets` with `not self_mod_id.startswith(target_mod + ".")`.
+
+### Catch 17 (P0-3): Backtick Template Literals, Comment Token Gluing, and String-Literal False Imports (`layer1_scanner.py`)
+* **The Defect:** `_strip_c_style_comments` ignored backtick strings (`` `...` ``) and replaced `/*...*/` with `""` instead of `" "`. A backtick string containing `/*` (`` const g = `packages/*`; ``) swallowed all subsequent imports in the file; `im/*c*/port` glued into `import`; and `"import { Fake } from './fake'"` inside string literals in TS, Go, and Java was extracted as a real dependency.
+* **The Remediation:** Replaced comments and backtick literals with whitespace (`"\n"` if multiline else `" "`), added single-pass string-literal shielding branches to `_TS_JS_IMPORT_RE` and `_GO_IMPORT_RE`, stripped string literals in `extract_java_imports`, and added Java wildcard `.*` support.
+
+### Catch 18 (P0-4): TypeScript Word Boundaries, Spaced `require()`, `".."` Relative Imports, `@/` Aliases & Composed `.index` Barrels (`layer1_scanner.py` & `layer2_slice_planner.py`)
+* **The Defect:** `extract_ts_js_imports` matched `my_require("./fake")` and `obj.import("./fake")`, missed `require( "./spaced" )` and `import { x } from ".."`, ignored `@/components/Button` slash paths, and `plan_from_scan` did not compose `src.` + `.index` stripping (failing to register `"auth"` for `src/auth/index.ts`).
+* **The Remediation:** Enforced `(?<!\.)\b` word boundaries, permitted whitespace inside `require(...)` and `import(...)`, resolved `"."` and `".."` relative paths and `@/` / `~/` slash paths, and composed `SOURCE_ROOT_MARKERS` stripping with `.index` barrel stripping in `_register_alias`.
+
+### Catch 19 (P1-1): Deep AST `RecursionError` Guard & `edges` String Iterable Validation (`layer1_scanner.py` & `layer2_slice_planner.py`)
+* **The Defect:** `ast.parse()` raised an unhandled `RecursionError` on deeply chained expressions (`"1 + \\\n" * 4000`), and `build_modernization_plan` iterated character-by-character over `edges={"a": "mod_b"}` instead of raising `TypeError`.
+* **The Remediation:** Caught `(SyntaxError, ValueError, RecursionError, MemoryError)` in `extract_python_imports` and rejected `str`/`bytes` or non-iterable values in `edges` with `TypeError`.
+
+---
+
+## 5. Layer-by-Layer Verification Architecture
 
 ```text
 +-----------------------------------------------------------------------------------+
@@ -81,12 +117,12 @@ This repository demonstrates that failure mode empirically, and how to fix it:
                                           |
 +-----------------------------------------v-----------------------------------------+
 | LAYER 2: Graph Condensation & Wave Planner (layer2_slice_planner.py)              |
-| Iterative Tarjan SCCs | Polyglot Monorepo Resolver | Kahn Waves | FFD Bin Packer  |
+| Iterative Tarjan SCCs | Locality-Aware Resolver  | Kahn Waves | Fast FFD Packer   |
 +-----------------------------------------+-----------------------------------------+
                                           |
 +-----------------------------------------v-----------------------------------------+
 | LAYER 1: Deterministic Repo Scanner & AST Extractor (layer1_scanner.py)           |
-| Bloat-First Pruning | Symlink Quarantine | DLP Gate | Comment-Free AST/Lexical    |
+| Zero-Read Bloat Pruner| Symlink Quarantine | DLP Gate | Statement-AST & Lexical   |
 +-----------------------------------------+-----------------------------------------+
                                           |
 +-----------------------------------------v-----------------------------------------+
@@ -99,7 +135,7 @@ This repository demonstrates that failure mode empirically, and how to fix it:
 
 | Layer / Module | Key Invariant | Test Suite | Verification Result |
 | :--- | :--- | :--- | :--- |
-| **Layer 0 (`layer0_invariants.py`)** | Rejects `bool`, `NaN`/`Inf`, path traversal (`..`/external symlinks), and negative module weights | `tests/test_layer0_invariants.py` | 100% pass |
-| **Layer 1 (`layer1_scanner.py`)** | Bloat-first directory pruning (`packages/web/node_modules`); skips all symlinks; prunes binary/unreadable/generated/minified files; quarantines PEM/AWS/GH secrets; strips `//` and `/* */` comments | `tests/test_layer1_scanner.py` | 100% pass |
-| **Layer 2 (`layer2_slice_planner.py`)** | Iterative Tarjan SCCs + iterative wave assignment on 1,200-node deep chains; resolves Python `__init__.py`, TypeScript `index.ts`, Go package dirs, and nested monorepo `src/` roots; exports Neo4j Cypher & Markdown Action Plan | `tests/test_layer2_slice_planner.py` | 100% pass |
-| **Layer 3 (`server.py`)** | End-to-end MCP tool registration, `pruned_file_count`, Neo4j Cypher, and Action Plan output | `tests/test_server.py` | 100% pass |
+| **Layer 0 (`layer0_invariants.py`)** | Rejects `bool`, `NaN`/`Inf`, path traversal (`..`/external symlinks), and negative module weights | `tests/test_layer0_invariants.py` (22 tests) | 100% pass |
+| **Layer 1 (`layer1_scanner.py`)** | Zero-read bloat pruning (`packages/web/node_modules`); skips all symlinks; prunes binary/unreadable/generated/minified files; quarantines PEM/AWS/GH secrets; linear-time comment/string-safe AST & lexical import extraction | `tests/test_layer1_scanner.py` (24 tests) | 100% pass |
+| **Layer 2 (`layer2_slice_planner.py`)** | Iterative Tarjan SCCs + iterative wave assignment on 1,200-node deep chains; locality-aware polyglot resolution across Python `__init__.py`, TypeScript `index.ts`, Go package dirs, and microservice `src/` roots; fast FFD slice packing; exports Neo4j Cypher & Markdown Action Plan | `tests/test_layer2_slice_planner.py` (21 tests) | 100% pass |
+| **Layer 3 (`server.py`)** | End-to-end MCP tool registration, `pruned_file_count`, Neo4j Cypher, and Action Plan output | `tests/test_server.py` (7 tests) | 100% pass |

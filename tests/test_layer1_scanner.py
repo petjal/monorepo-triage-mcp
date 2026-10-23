@@ -404,3 +404,105 @@ class TestAuditRound2Layer1:
         assert java_imps == ("com.example.RealService",)
 
 
+class TestAuditRound3Layer1:
+    def test_bloat_dir_pruned_without_reading_file_bytes(self, tmp_path: Path) -> None:
+        """P0-A: Files inside BLOAT_DIR_NAMES must be pruned via stat size without reading file bytes."""
+        repo = tmp_path / "repo"
+        nm = repo / "node_modules" / "pkg"
+        nm.mkdir(parents=True)
+        locked_vendor = nm / "bundle.js"
+        locked_vendor.write_text("export const x = 1;\n" * 100)
+        locked_vendor.chmod(0o000)
+        try:
+            summary = scan_repository(repo)
+            rec = summary.files[0]
+            assert rec.disposition == "PRUNED_BLOAT"
+            assert rec.reason == "vendored_or_build_dir"
+            assert rec.estimated_tokens > 0
+            assert rec.shannon_entropy == 0.0
+        finally:
+            locked_vendor.chmod(0o644)
+
+    def test_ts_export_indented_comments_no_redos_backtracking(self) -> None:
+        """P0-B: 'export' followed by hundreds of indented comment lines must run in < 50 ms (no ReDoS)."""
+        import time
+
+        from monorepo_triage.layer1_scanner import extract_ts_js_imports
+
+        payload = "export\n" + ("    // Indented comment line\n" * 600) + "const x = 1;\n"
+        t0 = time.perf_counter()
+        res = extract_ts_js_imports(payload, "src/doc.ts")
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        assert res == ()
+        assert elapsed_ms < 50.0
+
+    def test_backtick_literals_comment_token_gluing_and_string_literals(self) -> None:
+        """P0-3: Backtick '/*', comment token gluing ('im/*c*/port'), and imports inside string literals."""
+        from monorepo_triage.layer1_scanner import (
+            extract_go_imports,
+            extract_java_imports,
+            extract_ts_js_imports,
+        )
+
+        ts_code = (
+            "const glob = `packages/*`;\n"
+            "const msg = \"import { Fake } from './fake_str'\";\n"
+            "im/*comment*/port { GluedFake } from './glued_fake';\n"
+            "import/*comment*/{ RealA } from './real_a';\n"
+        )
+        ts_imps = extract_ts_js_imports(ts_code, "src/app.ts")
+        assert "./fake_str" not in ts_imps
+        assert "./glued_fake" not in ts_imps
+        assert "src.real_a" in ts_imps
+
+        java_code = (
+            "String s = \"import com.acme.FakeString;\";\n"
+            "im/*c*/port com.acme.FakeGlued;\n"
+            "import/*c*/com.acme.RealService;\n"
+            "import com.acme.models.*;\n"
+        )
+        java_imps = extract_java_imports(java_code)
+        assert java_imps == ("com.acme.RealService", "com.acme.models")
+
+        go_code = (
+            "package main\n"
+            "const raw = `/* not a block comment`\n"
+            "const s = \"import \\\"fake/str\\\"\"\n"
+            "import \"myrepo/pkg/real\"\n"
+        )
+        go_imps = extract_go_imports(go_code)
+        assert "fake/str" not in go_imps
+        assert "myrepo/pkg/real" in go_imps
+
+    def test_ts_word_boundaries_spaced_require_dotdot_and_slash_aliases(self) -> None:
+        """P0-4: Reject my_require/obj.import; support spaced require, '..', and '@/...' slash imports."""
+        from monorepo_triage.layer1_scanner import extract_ts_js_imports
+
+        ts_code = (
+            "my_require('./fake_req');\n"
+            "obj.import('./fake_imp');\n"
+            "const a = require( './spaced_req' );\n"
+            "const b = import(\n  './multiline_dyn'\n);\n"
+            "import { Parent } from '..';\n"
+            "import { Button } from '@/components/Button';\n"
+        )
+        imps = extract_ts_js_imports(ts_code, "src/features/card.ts")
+        assert "./fake_req" not in imps
+        assert "./fake_imp" not in imps
+        assert "src.features.spaced_req" in imps
+        assert "src.features.multiline_dyn" in imps
+        assert "src" in imps
+        assert "components.Button" in imps
+
+    def test_python_pep8_ancestor_import_and_deep_ast_recursion_guard(self) -> None:
+        """P0-2 & P1-1: 'from pkg import models' inside pkg/service.py omits ancestor 'pkg', and deep AST does not crash."""
+        from monorepo_triage.layer1_scanner import extract_python_imports
+
+        imps = extract_python_imports("from pkg import models\n", "pkg/service.py")
+        assert imps == ("pkg.models",)
+
+        deep_expr = "x = " + ("1 + \\\n" * 4000) + "1\n"
+        assert extract_python_imports(deep_expr, "pkg/deep.py") == ()
+
+
+

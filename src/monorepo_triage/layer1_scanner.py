@@ -1,6 +1,7 @@
 """Layer 1: Deterministic Repository Scanner, Bloat Pruning, DLP Quarantine, and AST Dependency Extractor."""
 
 import ast
+import math
 import os
 import posixpath
 import re
@@ -9,7 +10,6 @@ from pathlib import Path
 from typing import Literal
 
 from monorepo_triage.layer0_invariants import (
-    estimate_source_tokens,
     resolve_confined_path,
     shannon_entropy_bits_per_byte,
     validate_entropy_threshold,
@@ -53,6 +53,27 @@ SUPPORTED_SOURCE_EXTENSIONS: frozenset[str] = frozenset(
 
 MAX_SOURCE_FILE_BYTES: int = 2 * 1024 * 1024
 BINARY_SNIFF_BYTES: int = 8192
+ENTROPY_SAMPLE_BYTES: int = 8192
+
+_COMMENT_AND_BACKTICK_RE: re.Pattern[str] = re.compile(
+    r"""('(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")|(`(?:\\.|[^`\\])*`|/\*[\s\S]*?\*/|//[^\r\n]*)"""
+)
+
+_COMMENT_AND_ALL_STRINGS_RE: re.Pattern[str] = re.compile(
+    r"""'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`|/\*[\s\S]*?\*/|//[^\r\n]*"""
+)
+
+_TS_JS_IMPORT_RE: re.Pattern[str] = re.compile(
+    r"""(?<!\.)\b(?:(?:import|export)\s+(?:type\s+)?(?:\*\s+as\s+[\w$]+|[\w$]+(?:\s*,\s*(?:\*\s+as\s+[\w$]+|\{[^}]*\}))?|\{[^}]*\}|\*)\s*from\s*['"]([^'"]+)['"]|import\s*\(\s*['"]([^'"]+)['"]\s*\)|import\s*['"]([^'"]+)['"]|require\s*\(\s*['"]([^'"]+)['"]\s*\))|'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*\""""
+)
+
+_GO_IMPORT_RE: re.Pattern[str] = re.compile(
+    r"""\bimport\s*(?:\(([\s\S]*?)\)|"([^"]+)")|"(?:\\.|[^"\\])*\""""
+)
+
+_JAVA_IMPORT_RE: re.Pattern[str] = re.compile(
+    r"\bimport\s+(?:static\s+)?([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)*)(?:\.\*)?\s*;"
+)
 
 
 @dataclass(frozen=True)
@@ -81,93 +102,131 @@ class ScanSummary:
 
 def compute_module_id(rel_path: str) -> str:
     """Compute canonical module identifier from relative file path."""
-    p = Path(rel_path)
-    stem_path = p.with_suffix("")
-    parts = list(stem_path.parts)
-    if parts and parts[-1] == "__init__":
-        parts.pop()
-    if not parts:
+    slash_parts = rel_path.split("/")
+    last = slash_parts[-1]
+    dot_idx = last.rfind(".")
+    if dot_idx > 0:
+        slash_parts[-1] = last[:dot_idx]
+    if slash_parts and slash_parts[-1] == "__init__":
+        slash_parts.pop()
+    if not slash_parts:
         return "__init__"
-    return ".".join(parts)
+    return ".".join(slash_parts)
 
 
 def _strip_c_style_comments(text: str) -> str:
-    """Strip // and /* */ comments while preserving string literals."""
-    pattern = re.compile(
-        r"""('(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")|(/\*[\s\S]*?\*/|//[^\r\n]*)"""
+    """Strip // and /* */ comments and backtick literals while preserving single/double string literals."""
+    return _COMMENT_AND_BACKTICK_RE.sub(
+        lambda m: (
+            m.group(1)
+            if m.group(1) is not None
+            else ("\n" if "\n" in m.group(0) else " ")
+        ),
+        text,
     )
-    return pattern.sub(lambda m: m.group(1) if m.group(1) is not None else "", text)
+
+
+def _strip_comments_and_strings(text: str) -> str:
+    """Strip all C-style comments and string literals, replacing with whitespace to prevent token gluing."""
+    return _COMMENT_AND_ALL_STRINGS_RE.sub(
+        lambda m: "\n" if "\n" in m.group(0) else " ",
+        text,
+    )
 
 
 def extract_python_imports(text: str, rel_path: str) -> tuple[str, ...]:
-    """Extract Python imports using AST, resolving relative imports deterministically."""
+    """Extract Python imports using AST statement traversal, resolving relative imports deterministically."""
+    if "import" not in text:
+        return ()
     try:
         tree = ast.parse(text)
-    except (SyntaxError, ValueError):
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
         return ()
 
-    parent_parts = list(Path(rel_path).parent.parts)
+    parent_parts = rel_path.split("/")[:-1]
     extracted: set[str] = set()
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                extracted.add(alias.name)
-        elif isinstance(node, ast.ImportFrom):
-            base_parts: list[str] = []
-            if node.level > 0:
-                trim = node.level - 1
-                if trim > len(parent_parts):
-                    continue
-                base_parts = parent_parts[: len(parent_parts) - trim]
-            if node.module:
-                base_parts.extend(node.module.split("."))
+    stmt_stack: list[ast.AST] = [tree]
+    while stmt_stack:
+        curr = stmt_stack.pop()
+        for attr in ("body", "orelse", "finalbody", "handlers", "cases"):
+            stmts = getattr(curr, attr, None)
+            if not stmts:
+                continue
+            for node in stmts:
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        extracted.add(alias.name)
+                elif isinstance(node, ast.ImportFrom):
+                    base_parts: list[str] = []
+                    if node.level > 0:
+                        trim = node.level - 1
+                        if trim > len(parent_parts):
+                            continue
+                        base_parts = parent_parts[: len(parent_parts) - trim]
+                    if node.module:
+                        base_parts.extend(node.module.split("."))
 
-            base_mod = ".".join(base_parts)
-            if node.module is None:
-                for alias in node.names:
-                    if alias.name == "*":
-                        if base_mod:
+                    base_mod = ".".join(base_parts)
+                    if node.module is None:
+                        for alias in node.names:
+                            if alias.name == "*":
+                                if base_mod:
+                                    extracted.add(base_mod)
+                            else:
+                                target = f"{base_mod}.{alias.name}" if base_mod else alias.name
+                                extracted.add(target)
+                    elif base_mod:
+                        is_ancestor_pkg = (
+                            len(base_parts) <= len(parent_parts)
+                            and parent_parts[: len(base_parts)] == base_parts
+                        )
+                        if not is_ancestor_pkg or any(a.name == "*" for a in node.names):
                             extracted.add(base_mod)
-                    else:
-                        target = f"{base_mod}.{alias.name}" if base_mod else alias.name
-                        extracted.add(target)
-            elif base_mod:
-                extracted.add(base_mod)
-                for alias in node.names:
-                    if alias.name != "*":
-                        extracted.add(f"{base_mod}.{alias.name}")
+                        for alias in node.names:
+                            if alias.name != "*":
+                                extracted.add(f"{base_mod}.{alias.name}")
+                elif (
+                    hasattr(node, "body")
+                    or hasattr(node, "handlers")
+                    or hasattr(node, "cases")
+                ):
+                    stmt_stack.append(node)
 
     return tuple(sorted(extracted))
 
 
 def extract_ts_js_imports(text: str, rel_path: str) -> tuple[str, ...]:
-    """Extract TypeScript and JavaScript import and export-from targets."""
+    """Extract TypeScript and JavaScript import and export-from targets in linear time."""
     clean_text = _strip_c_style_comments(text)
     extracted: set[str] = set()
-    pattern = re.compile(
-        r"""(?:(?:import|export)\s+[\w$\s{},*]+\s+from\s+['"]([^'"]+)['"]|import\s*\(['"]([^'"]+)['"]\)|import\s+['"]([^'"]+)['"]|require\s*\(['"]([^'"]+)['"]\))"""
-    )
-    parent_dir = Path(rel_path).parent
+    parent_dir = posixpath.dirname(rel_path) or "."
 
-    for match in pattern.finditer(clean_text):
-        target = next(g for g in match.groups() if g is not None)
+    for match in _TS_JS_IMPORT_RE.finditer(clean_text):
+        target = next((g for g in match.groups() if g is not None), None)
+        if target is None:
+            continue
         extracted.add(target)
-        if target.startswith(("./", "../")):
-            norm = os.path.normpath(posixpath.join(parent_dir.as_posix(), target))
+        if target in {".", ".."} or target.startswith(("./", "../")):
+            norm = posixpath.normpath(posixpath.join(parent_dir, target))
             norm_no_ext = re.sub(r"\.(?:ts|tsx|js|jsx)$", "", norm)
-            mod = ".".join(Path(norm_no_ext).parts)
-            extracted.add(mod)
+            if norm_no_ext and norm_no_ext != "." and not norm_no_ext.startswith(".."):
+                extracted.add(norm_no_ext.replace("/", "."))
+        elif "/" in target:
+            clean_target = re.sub(r"^(?:@/|~/)+", "", target)
+            norm_no_ext = re.sub(r"\.(?:ts|tsx|js|jsx)$", "", clean_target)
+            parts = [p for p in norm_no_ext.split("/") if p and p not in {".", ".."}]
+            if parts:
+                extracted.add(".".join(parts))
 
     return tuple(sorted(extracted))
 
 
 def extract_go_imports(text: str) -> tuple[str, ...]:
-    """Extract Go import paths, ignoring comments and non-keyword identifiers."""
+    """Extract Go import paths, ignoring comments, string literals, and non-keyword identifiers."""
     clean_text = _strip_c_style_comments(text)
     extracted: set[str] = set()
-    pattern = re.compile(r'\bimport\s*(?:\(([\s\S]*?)\)|"([^"]+)")')
-    for match in pattern.finditer(clean_text):
+    for match in _GO_IMPORT_RE.finditer(clean_text):
         block, single = match.groups()
         if single:
             extracted.add(single)
@@ -180,11 +239,10 @@ def extract_go_imports(text: str) -> tuple[str, ...]:
 
 
 def extract_java_imports(text: str) -> tuple[str, ...]:
-    """Extract Java import statements, ignoring comments."""
-    clean_text = _strip_c_style_comments(text)
+    """Extract Java import statements, ignoring comments and string literals."""
+    clean_text = _strip_comments_and_strings(text)
     extracted: set[str] = set()
-    pattern = re.compile(r"\bimport\s+(?:static\s+)?([a-zA-Z0-9_.]+);")
-    for match in pattern.finditer(clean_text):
+    for match in _JAVA_IMPORT_RE.finditer(clean_text):
         extracted.add(match.group(1))
     return tuple(sorted(extracted))
 
@@ -215,67 +273,80 @@ def scan_repository(
     root_stat = resolved_root.stat()
 
     skipped_symlinks: list[str] = []
-    found_files: list[Path] = []
+    # Tuple of (rel_path, abs_path, st_size, bloat_rel_dir_or_none)
+    found_files: list[tuple[str, str, int, str | None]] = []
+    recommended_set: set[str] = set()
 
-    def collect_files(curr_dir: Path, active_dir_chain: set[tuple[int, int]]) -> None:
+    def collect_files(
+        curr_dir_str: str,
+        rel_prefix: str,
+        active_dir_chain: set[tuple[int, int]],
+        enclosing_bloat_dir: str | None,
+    ) -> None:
         try:
-            entries = sorted(curr_dir.iterdir(), key=lambda p: p.name)
+            with os.scandir(curr_dir_str) as it:
+                entries = sorted(it, key=lambda e: e.name)
         except (OSError, PermissionError):
             return
 
         for entry in entries:
-            rel_str = str(entry.relative_to(resolved_root))
-            if entry.is_symlink():
-                # Validate confinement via Layer 0 and skip all symlinks (directory, file, or broken)
-                # so canonical physical files are never double-counted or shadowed.
+            rel_str = f"{rel_prefix}/{entry.name}" if rel_prefix else entry.name
+            try:
+                is_link = entry.is_symlink()
+            except OSError:
+                continue
+
+            if is_link:
                 try:
-                    _ = resolve_confined_path(resolved_root, entry)
+                    _ = resolve_confined_path(resolved_root, Path(entry.path))
                 except (OSError, RuntimeError, ValueError):
                     pass
                 skipped_symlinks.append(rel_str)
                 continue
-            elif entry.is_dir():
-                try:
-                    st = entry.stat()
+
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    st = entry.stat(follow_symlinks=False)
                     inode_key = (st.st_dev, st.st_ino)
                     if inode_key in active_dir_chain:
                         skipped_symlinks.append(rel_str)
                         continue
-                    collect_files(entry, active_dir_chain | {inode_key})
-                except (OSError, PermissionError):
-                    continue
-            elif entry.is_file():
-                found_files.append(entry)
-
-    collect_files(resolved_root, {(root_stat.st_dev, root_stat.st_ino)})
-
-    records: list[FileRecord] = []
-    recommended_set: set[str] = set()
-
-    for file_path in sorted(found_files, key=lambda p: str(p.relative_to(resolved_root))):
-        rel_path = str(file_path.relative_to(resolved_root))
-        path_parts = Path(rel_path).parts[:-1]
-
-        # 1. Vendored, build, and cache directory pruning (checked FIRST before reading or DLP)
-        bloat_idx = next(
-            (i for i, part in enumerate(path_parts) if part in BLOAT_DIR_NAMES),
-            None,
-        )
-        if bloat_idx is not None:
-            bloat_rel_dir = "/".join(path_parts[: bloat_idx + 1])
-            recommended_set.add(bloat_rel_dir)
-            try:
-                f_size = file_path.stat().st_size
-                if f_size <= MAX_SOURCE_FILE_BYTES:
-                    b_data = file_path.read_bytes()
-                    b_tokens = estimate_source_tokens(b_data.decode("utf-8", errors="replace"))
-                    b_entropy = shannon_entropy_bits_per_byte(b_data)
-                else:
-                    b_tokens = max(1, f_size // 4)
-                    b_entropy = 0.0
+                    next_bloat = enclosing_bloat_dir
+                    if next_bloat is None and entry.name in BLOAT_DIR_NAMES:
+                        next_bloat = rel_str
+                    collect_files(
+                        entry.path,
+                        rel_str,
+                        active_dir_chain | {inode_key},
+                        next_bloat,
+                    )
+                elif entry.is_file(follow_symlinks=False):
+                    try:
+                        f_size = entry.stat(follow_symlinks=False).st_size
+                    except (OSError, PermissionError):
+                        f_size = -1
+                    found_files.append((rel_str, entry.path, f_size, enclosing_bloat_dir))
             except (OSError, PermissionError):
-                b_tokens = 1
-                b_entropy = 0.0
+                continue
+
+    collect_files(
+        str(resolved_root),
+        "",
+        {(root_stat.st_dev, root_stat.st_ino)},
+        None,
+    )
+
+    found_files.sort(key=lambda item: item[0])
+    records: list[FileRecord] = []
+
+    for rel_path, abs_path, file_size, bloat_dir in found_files:
+        # 1. Vendored, build, and cache directory pruning (zero disk read / zero DLP scan)
+        if bloat_dir is not None:
+            recommended_set.add(bloat_dir)
+            if file_size > 0:
+                b_tokens = max(1, math.ceil(file_size / 3.5))
+            else:
+                b_tokens = 0
             records.append(
                 FileRecord(
                     rel_path=rel_path,
@@ -283,22 +354,66 @@ def scan_repository(
                     disposition="PRUNED_BLOAT",
                     reason="vendored_or_build_dir",
                     estimated_tokens=b_tokens,
-                    shannon_entropy=b_entropy,
+                    shannon_entropy=0.0,
                     max_line_length=0,
                     imports=(),
                 )
             )
             continue
 
-        # 2. Read file bytes safely; prune unreadable files instead of creating 0-token active modules
+        # 2. Oversized or unreadable check before full file read
+        if file_size < 0:
+            records.append(
+                FileRecord(
+                    rel_path=rel_path,
+                    module_id=None,
+                    disposition="PRUNED_BLOAT",
+                    reason="unreadable_file",
+                    estimated_tokens=0,
+                    shannon_entropy=0.0,
+                    max_line_length=0,
+                    imports=(),
+                )
+            )
+            continue
+
+        if file_size > MAX_SOURCE_FILE_BYTES:
+            records.append(
+                FileRecord(
+                    rel_path=rel_path,
+                    module_id=None,
+                    disposition="PRUNED_BLOAT",
+                    reason="binary_or_oversized_blob",
+                    estimated_tokens=max(1, file_size // 4),
+                    shannon_entropy=0.0,
+                    max_line_length=0,
+                    imports=(),
+                )
+            )
+            continue
+
+        # 3. Read file bytes (sniff first 8 KB on files > 64 KB to skip large binaries early)
         try:
-            file_size = file_path.stat().st_size
-            if file_size > MAX_SOURCE_FILE_BYTES:
-                raw_bytes = b""
-                is_oversized = True
-            else:
-                raw_bytes = file_path.read_bytes()
-                is_oversized = False
+            with open(abs_path, "rb") as fh:
+                if file_size > 65536:
+                    head = fh.read(BINARY_SNIFF_BYTES)
+                    if b"\x00" in head:
+                        records.append(
+                            FileRecord(
+                                rel_path=rel_path,
+                                module_id=None,
+                                disposition="PRUNED_BLOAT",
+                                reason="binary_or_oversized_blob",
+                                estimated_tokens=max(1, file_size // 4),
+                                shannon_entropy=0.0,
+                                max_line_length=0,
+                                imports=(),
+                            )
+                        )
+                        continue
+                    raw_bytes = head + fh.read()
+                else:
+                    raw_bytes = fh.read()
         except (OSError, PermissionError):
             records.append(
                 FileRecord(
@@ -314,18 +429,15 @@ def scan_repository(
             )
             continue
 
-        # 3. Binary or oversized blob check
-        is_binary = is_oversized or (b"\x00" in raw_bytes[:BINARY_SNIFF_BYTES])
-        if is_binary:
-            est_tokens = max(1, file_size // 4) if is_oversized else max(1, len(raw_bytes) // 4)
+        if b"\x00" in raw_bytes[:BINARY_SNIFF_BYTES]:
             records.append(
                 FileRecord(
                     rel_path=rel_path,
                     module_id=None,
                     disposition="PRUNED_BLOAT",
                     reason="binary_or_oversized_blob",
-                    estimated_tokens=est_tokens,
-                    shannon_entropy=shannon_entropy_bits_per_byte(raw_bytes),
+                    estimated_tokens=max(1, len(raw_bytes) // 4),
+                    shannon_entropy=0.0,
                     max_line_length=0,
                     imports=(),
                 )
@@ -333,17 +445,18 @@ def scan_repository(
             continue
 
         text = raw_bytes.decode("utf-8", errors="replace")
-        lines = text.splitlines()
-        max_line = max((len(l) for l in lines), default=0)
-        entropy = shannon_entropy_bits_per_byte(raw_bytes)
-        est_tokens = estimate_source_tokens(text)
+        est_tokens = max(1, math.ceil(len(raw_bytes) / 3.5)) if raw_bytes else 0
 
-        # 4. Zero-Trust DLP Quarantine check
-        if (
-            PEM_PATTERN.search(text)
-            or AWS_KEY_PATTERN.search(text)
-            or GH_TOKEN_PATTERN.search(text)
-        ):
+        # 4. Zero-Trust DLP Quarantine check (fast C-level prefix guard before regex engine)
+        has_secret = (
+            ("-----BEGIN " in text and bool(PEM_PATTERN.search(text)))
+            or ("AKIA" in text and bool(AWS_KEY_PATTERN.search(text)))
+            or ("ghp_" in text and bool(GH_TOKEN_PATTERN.search(text)))
+        )
+        if has_secret:
+            lines = text.splitlines()
+            max_line = max((len(l) for l in lines), default=0)
+            entropy = shannon_entropy_bits_per_byte(raw_bytes[:ENTROPY_SAMPLE_BYTES])
             records.append(
                 FileRecord(
                     rel_path=rel_path,
@@ -358,7 +471,28 @@ def scan_repository(
             )
             continue
 
-        # 3. Generated code marker check (first 10 lines)
+        dot_idx = rel_path.rfind(".")
+        ext = rel_path[dot_idx:].lower() if dot_idx != -1 else ""
+        if ext not in SUPPORTED_SOURCE_EXTENSIONS:
+            records.append(
+                FileRecord(
+                    rel_path=rel_path,
+                    module_id=None,
+                    disposition="PRUNED_BLOAT",
+                    reason="unsupported_or_non_source",
+                    estimated_tokens=est_tokens,
+                    shannon_entropy=0.0,
+                    max_line_length=0,
+                    imports=(),
+                )
+            )
+            continue
+
+        lines = text.splitlines()
+        max_line = max((len(l) for l in lines), default=0)
+        entropy = shannon_entropy_bits_per_byte(raw_bytes[:ENTROPY_SAMPLE_BYTES])
+
+        # 5. Generated code marker check (first 10 lines)
         header_sample = "\n".join(lines[:10])
         if any(marker in header_sample for marker in GENERATED_MARKERS):
             records.append(
@@ -375,7 +509,7 @@ def scan_repository(
             )
             continue
 
-        # 4. Minified or high-entropy bundle check
+        # 6. Minified or high-entropy bundle check
         if max_line > valid_max_line or (max_line > 250 and entropy >= valid_entropy_th):
             records.append(
                 FileRecord(
@@ -391,36 +525,21 @@ def scan_repository(
             )
             continue
 
-        # 5. Active source vs non-source classification
-        ext = file_path.suffix.lower()
-        if ext in SUPPORTED_SOURCE_EXTENSIONS:
-            mod_id = compute_module_id(rel_path)
-            extracted = extract_imports(text, rel_path, ext)
-            records.append(
-                FileRecord(
-                    rel_path=rel_path,
-                    module_id=mod_id,
-                    disposition="ACTIVE_SOURCE",
-                    reason="supported_source_language",
-                    estimated_tokens=est_tokens,
-                    shannon_entropy=entropy,
-                    max_line_length=max_line,
-                    imports=extracted,
-                )
+        # 7. Active source module extraction
+        mod_id = compute_module_id(rel_path)
+        extracted = extract_imports(text, rel_path, ext)
+        records.append(
+            FileRecord(
+                rel_path=rel_path,
+                module_id=mod_id,
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=est_tokens,
+                shannon_entropy=entropy,
+                max_line_length=max_line,
+                imports=extracted,
             )
-        else:
-            records.append(
-                FileRecord(
-                    rel_path=rel_path,
-                    module_id=None,
-                    disposition="PRUNED_BLOAT",
-                    reason="unsupported_or_non_source",
-                    estimated_tokens=est_tokens,
-                    shannon_entropy=entropy,
-                    max_line_length=max_line,
-                    imports=(),
-                )
-            )
+        )
 
     active_tokens = sum(r.estimated_tokens for r in records if r.disposition == "ACTIVE_SOURCE")
     pruned_tokens = sum(r.estimated_tokens for r in records if r.disposition == "PRUNED_BLOAT")

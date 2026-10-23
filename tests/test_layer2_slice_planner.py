@@ -1,5 +1,7 @@
 """Tests for Layer 2: Tarjan SCC Condensation, DAG Wave Assignment, and Slice Bin-Packing."""
 
+from pathlib import Path
+
 from monorepo_triage.layer1_scanner import FileRecord, ScanSummary
 from monorepo_triage.layer2_slice_planner import (
     build_modernization_plan,
@@ -565,6 +567,124 @@ class TestAuditRound2Layer2:
         assert "# Pre-Execution Technical Specification & Agent Action Plan" in md
         assert "### Wave 0 (Max Parallel Agent Workers: 1" in md
         assert "### Wave 1 (Max Parallel Agent Workers: 1" in md
+
+
+class TestAuditRound3Layer2:
+    def test_multi_service_monorepo_locality_prevents_false_cross_service_knot(self) -> None:
+        """P0-1: Independent microservices sharing module names (db.py, api.py) must resolve locally without false cycles."""
+        files = (
+            FileRecord(
+                rel_path="services/auth/src/db.py",
+                module_id="services.auth.src.db",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=100,
+                shannon_entropy=4.0,
+                max_line_length=50,
+                imports=(),
+            ),
+            FileRecord(
+                rel_path="services/auth/src/api.py",
+                module_id="services.auth.src.api",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=100,
+                shannon_entropy=4.0,
+                max_line_length=50,
+                imports=("db",),
+            ),
+            FileRecord(
+                rel_path="services/billing/src/db.py",
+                module_id="services.billing.src.db",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=100,
+                shannon_entropy=4.0,
+                max_line_length=50,
+                imports=("api",),
+            ),
+            FileRecord(
+                rel_path="services/billing/src/api.py",
+                module_id="services.billing.src.api",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=100,
+                shannon_entropy=4.0,
+                max_line_length=50,
+                imports=(),
+            ),
+        )
+        scan = ScanSummary("/tmp/r", files, 400, 0, 0, 0.0, (), ())
+        plan = plan_from_scan(scan, token_budget=16000)
+        assert plan.cyclic_knot_count == 0
+        node_map = {n.scc_id: n for n in plan.condensation_nodes}
+        assert node_map["services.auth.src.db"].wave == 0
+        assert node_map["services.auth.src.api"].wave == 1
+        assert node_map["services.billing.src.api"].wave == 0
+        assert node_map["services.billing.src.db"].wave == 1
+
+    def test_pep8_absolute_import_with_package_init_reexport_stays_acyclic(
+        self, tmp_path: Path
+    ) -> None:
+        """P0-2: 'from pkg import models' inside pkg/service.py must not form a cycle with pkg/__init__.py."""
+        from monorepo_triage.layer1_scanner import scan_repository
+
+        pkg = tmp_path / "pkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("from pkg.service import UserService\n")
+        (pkg / "models.py").write_text("class User: pass\n")
+        (pkg / "service.py").write_text("from pkg import models\nclass UserService: pass\n")
+
+        scan = scan_repository(tmp_path)
+        plan = plan_from_scan(scan, token_budget=16000)
+        assert plan.cyclic_knot_count == 0
+        node_map = {n.scc_id: n for n in plan.condensation_nodes}
+        assert node_map["pkg.models"].wave == 0
+        assert node_map["pkg.service"].wave == 1
+        assert node_map["pkg"].wave == 2
+
+    def test_composed_src_and_index_barrel_alias_resolution(self) -> None:
+        """P0-4: 'src/auth/index.ts' must register composed alias 'auth' for baseUrl/alias imports."""
+        files = (
+            FileRecord(
+                rel_path="src/auth/index.ts",
+                module_id="src.auth.index",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=200,
+                shannon_entropy=4.0,
+                max_line_length=50,
+                imports=(),
+            ),
+            FileRecord(
+                rel_path="src/pages/home.tsx",
+                module_id="src.pages.home",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=300,
+                shannon_entropy=4.0,
+                max_line_length=50,
+                imports=("auth",),
+            ),
+        )
+        scan = ScanSummary("/tmp/r", files, 500, 0, 0, 0.0, (), ())
+        plan = plan_from_scan(scan, token_budget=16000)
+        node_map = {n.scc_id: n for n in plan.condensation_nodes}
+        assert node_map["src.auth.index"].wave == 0
+        assert node_map["src.pages.home"].wave == 1
+
+    def test_edges_string_type_rejected_and_empty_plan_markdown(self) -> None:
+        """P1-1: Passing a string instead of a collection of module IDs in edges must raise TypeError."""
+        import pytest
+
+        with pytest.raises(TypeError, match="iterable of module IDs"):
+            build_modernization_plan({"a": 100, "m": 100}, {"a": "mod_b"})  # type: ignore[arg-type]
+
+        empty_scan = ScanSummary("/tmp/empty", (), 0, 0, 0, 0.0, (), ())
+        empty_plan = plan_from_scan(empty_scan, token_budget=16000)
+        md = render_agent_action_plan_markdown(empty_scan, empty_plan, token_budget=16000)
+        assert "- **Bottom-Up Modernization Waves:** 0\n" in md
+
 
 
 

@@ -52,13 +52,23 @@ def triage_and_plan_repository(
     )
     neo4j_cypher = export_neo4j_cypher(plan)
 
-    scan_dict = asdict(scan_summary)
     pruned_count = sum(1 for f in scan_summary.files if f.disposition == "PRUNED_BLOAT")
-    scan_dict["pruned_file_count"] = pruned_count
-    if not include_pruned_files:
-        scan_dict["files"] = [
-            f for f in scan_dict["files"] if f["disposition"] != "PRUNED_BLOAT"
-        ]
+    included_files = (
+        scan_summary.files
+        if include_pruned_files
+        else tuple(f for f in scan_summary.files if f.disposition != "PRUNED_BLOAT")
+    )
+    scan_dict: dict[str, Any] = {
+        "root_path": scan_summary.root_path,
+        "files": [asdict(f) for f in included_files],
+        "active_tokens": scan_summary.active_tokens,
+        "pruned_tokens": scan_summary.pruned_tokens,
+        "quarantined_tokens": scan_summary.quarantined_tokens,
+        "token_reduction_ratio": scan_summary.token_reduction_ratio,
+        "symlink_loops_skipped": list(scan_summary.symlink_loops_skipped),
+        "recommended_exclusions": list(scan_summary.recommended_exclusions),
+        "pruned_file_count": pruned_count,
+    }
 
     return {
         "scan_summary": scan_dict,

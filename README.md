@@ -38,6 +38,22 @@ This tool implements the pre-flight inspection and partitioning workflow develop
 | **Wave Scheduling** | Iterative bottom-up DAG level assignment ($\text{wave}(u) = 1 + \max \text{wave}(v)$) | Kahn (1962), *Commun. ACM* 5(11) |
 | **Slice Packing** | Per-wave First-Fit Decreasing (FFD) bin packing by `(-tokens, scc_id)` | Johnson (1973), *J. Comput. Syst. Sci.* |
 
+## Real-World Public Monorepo Benchmarks & Full-Stack Telemetry
+
+To verify efficiency on modest customer VMs, the full pipeline (`scan_repository` $\rightarrow$ `plan_from_scan` $\rightarrow$ `render_agent_action_plan_markdown` $\rightarrow$ `export_neo4j_cypher`) was benchmarked inside a kernel-enforced **1-vCPU, 128 MB RAM, 0-Swap Linux cgroup v2 scope** (`systemd-run --user --scope -p MemoryMax=128M -p MemorySwapMax=0 -p CPUQuota=100%`) against two complex public repositories:
+1. **`django/django`** (7,114 files, 86 MB on disk: 2,982 active modules / 5.64M active tokens, 4,132 pruned files / 11.13M pruned tokens, 16 circular dependency knots across 24 modernization waves, 4 documentation symlink loops skipped).
+2. **`trpc/trpc` + 4,000 `node_modules` files** (5,686 files, 56 MB on disk: 852 active TypeScript modules / 775K active tokens, 4,834 pruned files / 13.69M pruned tokens, 3 circular dependency knots across 18 modernization waves).
+
+| Target / Metric | Before Systems Optimization (`c97de85`) | After Systems Optimization (1-vCPU / 128 MB cgroup) | Improvement |
+| :--- | :--- | :--- | :--- |
+| **`trpc/trpc` (+4k `node_modules`) Total Time** | `2,149.14 ms` | **`282.62 ms`** | **7.6x faster** |
+| **`trpc/trpc` Kernel Read Syscalls (`/proc/self/io syscr`)** | `11,373` syscalls (`48.30 MB` VFS read) | **`3,300` syscalls (`7.16 MB` VFS read)** | **71.0% fewer syscalls / 85.2% less I/O** |
+| **`trpc/trpc` Peak Resident Memory (`VmHWM`)** | `30.43 MB` | **`22.14 MB`** (`0` network egress) | **27.2% lower peak RAM** |
+| **`django/django` (7,114 files) Total Time** | `5,705.29 ms` | **`2,517.95 ms`** (`2,742.70 ms` in 128 MB cgroup) | **2.3x faster** (`9.3x` non-AST speedup) |
+| **`django/django` Peak Resident Memory (`VmHWM`)** | `58.93 MB` | **`56.37 MB`** (`0` network egress) | Fits comfortably in 128 MB RAM |
+| **TS `export` + 600 Indented Comments (25 KB)** | `7,140.39 ms` ($O(L^3)$ regex backtracking) | **`0.58 ms`** (linear single-pass regex) | **12,311x faster** |
+| **20,000-Module FFD Slice Packing** | `5,181.13 ms` ($O(K^2 \log K)$ tuple re-sort) | **`97.44 ms`** (mutable bin + capacity pruning) | **53.2x faster** |
+
 ## Self-Hosting Example
 
 Running `triage_and_plan_repository` on this repository itself (`token_budget=6000`):
@@ -53,10 +69,10 @@ Running `triage_and_plan_repository` on this repository itself (`token_budget=60
     "src.monorepo_triage": 0,
     "src.monorepo_triage.layer1_scanner": 1,
     "tests.test_layer0_invariants": 1,
-    "src.monorepo_triage.layer2_slice_planner": 2,
     "tests.test_layer1_scanner": 2,
-    "src.monorepo_triage.server": 3,
+    "src.monorepo_triage.layer2_slice_planner": 2,
     "tests.test_layer2_slice_planner": 3,
+    "src.monorepo_triage.server": 3,
     "tests.test_server": 4
   }
 }
@@ -64,7 +80,7 @@ Running `triage_and_plan_repository` on this repository itself (`token_budget=60
 
 ## Why Static AST / Lexical Extraction is Used Over Build-Daemon Execution
 
-In an enterprise pre-flight assessment over a customer VPN or VDI, executing arbitrary customer build wrappers (`mvn`, `gradle`, `bazel`, `npm postinstall`) before triage is slow and often fails due to missing internal artifact mirrors or native toolchain mismatches. Static AST parsing (`ast.parse` for Python) and comment-stripped lexical import extraction (for TypeScript/JavaScript including `index` barrels and `export from`, Go package directories, and Java/Maven sub-projects) run deterministically in milliseconds with zero network egress and zero untrusted code execution.
+In an enterprise pre-flight assessment over a customer VPN or VDI, executing arbitrary customer build wrappers (`mvn`, `gradle`, `bazel`, `npm postinstall`) before triage is slow and often fails due to missing internal artifact mirrors or native toolchain mismatches. Static AST parsing (`ast.parse` statement-block traversal for Python) and comment-stripped lexical import extraction (for TypeScript/JavaScript including `index` barrels, `export from`, and `@/` aliases, Go package directories, and Java/Maven sub-projects) run deterministically in milliseconds with zero network egress and zero untrusted code execution.
 
 ## Limitations & Uncertainty
 
@@ -78,10 +94,10 @@ Asking a single LLM session to practice strict "Test-First TDD" is mostly theate
 
 Instead, this repository was built in three distinct stages:
 1. **Working Nascent Prototype:** I specified the 4-layer architecture and domain invariants from my Black Duck field experience, and directed a fast code-generation model to build a working prototype with 48 baseline unit tests.
-2. **Cold-Context Adversarial Red-Teaming:** Once the nascent tool was running, I spawned an isolated, zero-context reviewer model tasked strictly with breaking the working code via live Python probes. That adversarial review uncovered **11 real defects** that passed the original 48 happy-path tests (including nested monorepo `packages/*/node_modules` exclusion errors, false circular dependency knots on Python `__init__.py` re-exports, Go package directory resolution failures, TypeScript `index.ts` barrel blindspots, symlink shadowing, and `scc_id` delimiter collisions).
-3. **Regression Test Hardening:** Each of those 11 concrete failure modes was turned into a failing regression test first and then fixed, expanding the suite to 65 passing unit tests.
+2. **Cold-Context Adversarial Red-Teaming & Live Repo Profiling:** Once the nascent tool was running, I spawned isolated, zero-context reviewer models tasked strictly with breaking the working code via live Python probes and profiled full-stack system telemetry (`/proc/self/io`, `/proc/self/status`, `cProfile`) against `django/django` and `trpc/trpc`. Across three adversarial rounds, that process uncovered **19 real defects and systems bottlenecks** that passed the original 48 happy-path tests (including full disk reads on pruned `node_modules` files, $O(L^3)$ TypeScript regex backtracking, $O(K^2 \log K)$ FFD tuple re-sorting, cross-service microservice alias collisions, false Python `__init__.py` cycles on PEP 8 imports, Go package directory resolution failures, TypeScript `index.ts` barrel blindspots, backtick comment corruption, symlink shadowing, and `scc_id` delimiter collisions).
+3. **Regression Test Hardening:** Each concrete failure mode was turned into a failing regression test first and then fixed, expanding the suite to **74 passing unit tests**.
 
-For the complete defect log and architectural breakdown, see [VERIFICATION_LOG.md](https://github.com/petjal/monorepo-triage-mcp/blob/master/VERIFICATION_LOG.md).
+For the complete defect log, benchmark telemetry, and architectural breakdown, see [VERIFICATION_LOG.md](https://github.com/petjal/monorepo-triage-mcp/blob/master/VERIFICATION_LOG.md).
 
 ## Run
 

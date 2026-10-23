@@ -1,6 +1,7 @@
 """Layer 2: Tarjan SCC Condensation, Bottom-Up Wave Assignment, and Token-Bounded Slice Planner."""
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -48,6 +49,26 @@ class _RawSccItem:
     modules: tuple[str, ...]
     is_cyclic: bool
     total_tokens: int
+
+
+class _MutableSliceBin:
+    __slots__ = ("modules", "scc_ids", "slice_id", "status", "total_tokens", "wave")
+
+    def __init__(
+        self,
+        slice_id: str,
+        wave: int,
+        scc_ids: list[str],
+        modules: list[str],
+        total_tokens: int,
+        status: SliceStatus,
+    ) -> None:
+        self.slice_id = slice_id
+        self.wave = wave
+        self.scc_ids = scc_ids
+        self.modules = modules
+        self.total_tokens = total_tokens
+        self.status = status
 
 
 def _solve_tarjan_sccs(
@@ -116,11 +137,20 @@ def build_modernization_plan(
     valid_budget = validate_token_budget(token_budget)
     valid_modules = validate_module_tokens(modules)
 
+    if not isinstance(edges, dict):
+        raise TypeError(f"Expected dict for edges, got {type(edges).__name__}")
+
     # Sanitize and normalize edges to sets of valid modules
     clean_edges: dict[str, set[str]] = {}
     for mod in valid_modules:
         raw_deps = edges.get(mod, set())
-        clean_edges[mod] = {dep for dep in raw_deps if dep in valid_modules}
+        if isinstance(raw_deps, (str, bytes)) or not isinstance(raw_deps, Iterable):
+            raise TypeError(
+                f"Dependencies for {mod!r} must be an iterable of module IDs, got {type(raw_deps).__name__}"
+            )
+        clean_edges[mod] = {
+            dep for dep in raw_deps if isinstance(dep, str) and dep in valid_modules
+        }
 
     # 1. Tarjan SCC Condensation
     raw_sccs = _solve_tarjan_sccs(valid_modules, clean_edges)
@@ -168,8 +198,6 @@ def build_modernization_plan(
         scc_deps[item.scc_id] = tuple(sorted(deps))
 
     # 3. Iterative Bottom-Up Wave Assignment on Condensation DAG (Kahn 1962)
-    # Tarjan emits SCCs in reverse topological order (leaves first), and we also
-    # guard with an explicit iterative post-order stack so arbitrary ordering never recurses.
     wave_memo: dict[str, int] = {}
     for item in scc_meta:
         if item.scc_id in wave_memo:
@@ -216,55 +244,63 @@ def build_modernization_plan(
 
     for w in range(max_wave + 1):
         wave_nodes = waves.get(w, [])
-        # Order SCCs by (-total_tokens, scc_id)
+        if not wave_nodes:
+            continue
         sorted_nodes = sorted(wave_nodes, key=lambda n: (-n.total_tokens, n.scc_id))
+        min_wave_tokens = sorted_nodes[-1].total_tokens
 
-        wave_slices: list[ModernizationSlice] = []
+        wave_bins: list[_MutableSliceBin] = []
+        open_bins: list[_MutableSliceBin] = []
 
         for node in sorted_nodes:
             if node.total_tokens > valid_budget:
-                slice_id = f"wave_{w}_slice_{len(wave_slices):02d}"
-                wave_slices.append(
-                    ModernizationSlice(
+                slice_id = f"wave_{w}_slice_{len(wave_bins):02d}"
+                wave_bins.append(
+                    _MutableSliceBin(
                         slice_id=slice_id,
                         wave=w,
-                        scc_ids=(node.scc_id,),
-                        modules=node.modules,
+                        scc_ids=[node.scc_id],
+                        modules=list(node.modules),
                         total_tokens=node.total_tokens,
                         status="OVERSIZED_COUPLED_KNOT",
                     )
                 )
             else:
                 placed = False
-                for idx, s in enumerate(wave_slices):
-                    if s.status == "READY" and (s.total_tokens + node.total_tokens <= valid_budget):
-                        new_scc_ids = tuple(sorted(s.scc_ids + (node.scc_id,)))
-                        new_modules = tuple(sorted(s.modules + node.modules))
-                        new_tokens = s.total_tokens + node.total_tokens
-                        wave_slices[idx] = ModernizationSlice(
-                            slice_id=s.slice_id,
-                            wave=w,
-                            scc_ids=new_scc_ids,
-                            modules=new_modules,
-                            total_tokens=new_tokens,
-                            status="READY",
-                        )
+                for idx, b in enumerate(open_bins):
+                    if b.total_tokens + node.total_tokens <= valid_budget:
+                        b.scc_ids.append(node.scc_id)
+                        b.modules.extend(node.modules)
+                        b.total_tokens += node.total_tokens
+                        if valid_budget - b.total_tokens < min_wave_tokens:
+                            open_bins.pop(idx)
                         placed = True
                         break
                 if not placed:
-                    slice_id = f"wave_{w}_slice_{len(wave_slices):02d}"
-                    wave_slices.append(
-                        ModernizationSlice(
-                            slice_id=slice_id,
-                            wave=w,
-                            scc_ids=(node.scc_id,),
-                            modules=node.modules,
-                            total_tokens=node.total_tokens,
-                            status="READY",
-                        )
+                    slice_id = f"wave_{w}_slice_{len(wave_bins):02d}"
+                    new_bin = _MutableSliceBin(
+                        slice_id=slice_id,
+                        wave=w,
+                        scc_ids=[node.scc_id],
+                        modules=list(node.modules),
+                        total_tokens=node.total_tokens,
+                        status="READY",
                     )
+                    wave_bins.append(new_bin)
+                    if valid_budget - new_bin.total_tokens >= min_wave_tokens:
+                        open_bins.append(new_bin)
 
-        all_slices.extend(wave_slices)
+        for b in wave_bins:
+            all_slices.append(
+                ModernizationSlice(
+                    slice_id=b.slice_id,
+                    wave=b.wave,
+                    scc_ids=tuple(sorted(b.scc_ids)),
+                    modules=tuple(sorted(b.modules)),
+                    total_tokens=b.total_tokens,
+                    status=b.status,
+                )
+            )
 
     total_active_tokens = sum(n.total_tokens for n in condensation_nodes)
     cyclic_knot_count = sum(1 for n in condensation_nodes if n.is_cyclic)
@@ -287,6 +323,30 @@ SOURCE_ROOT_MARKERS: tuple[str, ...] = (
 )
 
 
+def _shared_prefix_segments(mod_a: str, mod_b: str) -> int:
+    """Count shared leading dot-delimited package segments between two module IDs."""
+    parts_a = mod_a.split(".")
+    parts_b = mod_b.split(".")
+    shared = 0
+    for pa, pb in zip(parts_a[:-1], parts_b[:-1]):
+        if pa == pb:
+            shared += 1
+        else:
+            break
+    return shared
+
+
+def _filter_by_locality(self_mod_id: str, candidates: set[str]) -> set[str]:
+    """Resolve ambiguous multi-service aliases to the candidate(s) sharing the closest package root."""
+    if len(candidates) <= 1:
+        return candidates
+    scored = [(cand, _shared_prefix_segments(self_mod_id, cand)) for cand in candidates]
+    max_shared = max(score for _, score in scored)
+    if max_shared > 0:
+        return {cand for cand, score in scored if score == max_shared}
+    return candidates
+
+
 def _resolve_import_targets(
     imp: str,
     self_mod_id: str,
@@ -303,40 +363,58 @@ def _resolve_import_targets(
         for i in range(len(slash_parts)):
             sub_dir = "/".join(slash_parts[i:])
             if sub_dir in go_dir_to_modules:
-                for target_mod in go_dir_to_modules[sub_dir]:
-                    if target_mod != self_mod_id:
-                        resolved.add(target_mod)
+                dir_mods = go_dir_to_modules[sub_dir]
+                if self_mod_id in dir_mods:
+                    continue
+                for target_mod in dir_mods:
+                    resolved.add(target_mod)
                 if resolved:
                     return resolved
 
     # 2. Direct module or alias match (including barrel index.ts and nested src/ layouts)
     if imp in active_module_set:
-        if imp != self_mod_id:
+        if imp != self_mod_id and not self_mod_id.startswith(imp + "."):
             resolved.add(imp)
         return resolved
     if imp in alias_to_targets:
-        for target_mod in alias_to_targets[imp]:
-            if target_mod != self_mod_id:
-                resolved.add(target_mod)
-        return resolved
+        cands = {
+            t
+            for t in alias_to_targets[imp]
+            if t != self_mod_id and not self_mod_id.startswith(t + ".")
+        }
+        return _filter_by_locality(self_mod_id, cands)
 
     # 3. Single-level symbol stripping (e.g. 'pkg.service.UserService' -> 'pkg.service')
     if "." in imp:
         parent_cand = imp.rsplit(".", 1)[0]
-        # Avoid false child -> parent __init__.py cycles when a submodule imports an unknown symbol
-        # from its own parent package namespace (e.g. pkg.service importing pkg.UNKNOWN_CONST).
         if self_mod_id.startswith(parent_cand + "."):
             return resolved
         if parent_cand in active_module_set and parent_cand != self_mod_id:
             resolved.add(parent_cand)
             return resolved
         if parent_cand in alias_to_targets:
-            for target_mod in alias_to_targets[parent_cand]:
-                if target_mod != self_mod_id and not self_mod_id.startswith(target_mod + "."):
-                    resolved.add(target_mod)
-            return resolved
+            cands = {
+                t
+                for t in alias_to_targets[parent_cand]
+                if t != self_mod_id and not self_mod_id.startswith(t + ".")
+            }
+            return _filter_by_locality(self_mod_id, cands)
 
     return resolved
+
+
+def _register_alias(
+    alias: str,
+    target_mod: str,
+    active_module_set: set[str],
+    alias_to_targets: dict[str, set[str]],
+) -> None:
+    if alias and alias not in active_module_set:
+        alias_to_targets.setdefault(alias, set()).add(target_mod)
+    if alias.endswith(".index"):
+        barrel = alias[: -len(".index")]
+        if barrel and barrel not in active_module_set:
+            alias_to_targets.setdefault(barrel, set()).add(target_mod)
 
 
 def plan_from_scan(
@@ -358,21 +436,18 @@ def plan_from_scan(
         # TypeScript / JS barrel index resolution (src.auth.index -> src.auth)
         if mod_id.endswith(".index"):
             barrel_prefix = mod_id[: -len(".index")]
-            if barrel_prefix and barrel_prefix not in active_module_set:
-                alias_to_targets.setdefault(barrel_prefix, set()).add(mod_id)
+            _register_alias(barrel_prefix, mod_id, active_module_set, alias_to_targets)
 
         # Root and nested monorepo source-root prefixes (src., packages.core.src., billing.src.main.java.)
         for marker in SOURCE_ROOT_MARKERS:
             if mod_id.startswith(marker):
                 stripped = mod_id[len(marker) :]
-                if stripped and stripped not in active_module_set:
-                    alias_to_targets.setdefault(stripped, set()).add(mod_id)
+                _register_alias(stripped, mod_id, active_module_set, alias_to_targets)
             nested_marker = "." + marker
             if nested_marker in mod_id:
                 idx = mod_id.find(nested_marker)
                 stripped = mod_id[idx + len(nested_marker) :]
-                if stripped and stripped not in active_module_set:
-                    alias_to_targets.setdefault(stripped, set()).add(mod_id)
+                _register_alias(stripped, mod_id, active_module_set, alias_to_targets)
 
     go_dir_to_modules: dict[str, set[str]] = {}
     for f in active_files:
@@ -433,6 +508,11 @@ def render_agent_action_plan_markdown(
         f.rel_path for f in scan_summary.files if f.disposition == "QUARANTINED_DLP"
     ]
     active_count = sum(1 for f in scan_summary.files if f.disposition == "ACTIVE_SOURCE")
+    waves_str = (
+        f"{plan.max_wave_depth + 1} (Waves 0..{plan.max_wave_depth})"
+        if plan.condensation_nodes
+        else "0"
+    )
 
     out: list[str] = [
         "# Pre-Execution Technical Specification & Agent Action Plan",
@@ -444,7 +524,7 @@ def render_agent_action_plan_markdown(
         f"- **DLP Quarantined Files:** {len(quarantined_files)} ({scan_summary.quarantined_tokens:,} tokens)",
         f"- **Recommended Directory Exclusions:** {', '.join(scan_summary.recommended_exclusions) or 'None'}",
         f"- **Circular Dependency Knots (Tarjan SCCs):** {plan.cyclic_knot_count}",
-        f"- **Bottom-Up Modernization Waves:** {plan.max_wave_depth + 1 if plan.condensation_nodes else 0} (Waves 0..{plan.max_wave_depth})",
+        f"- **Bottom-Up Modernization Waves:** {waves_str}",
         f"- **Per-Agent Slice Token Ceiling:** {valid_budget:,} tokens",
         "",
         "## 2. Wave-Ordered Parallel Agent Swarm Schedule",
@@ -476,4 +556,3 @@ def render_agent_action_plan_markdown(
             )
 
     return "\n".join(out)
-
