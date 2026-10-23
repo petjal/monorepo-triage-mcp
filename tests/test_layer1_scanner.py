@@ -2,8 +2,6 @@
 
 from pathlib import Path
 
-import pytest
-
 from monorepo_triage.layer1_scanner import (
     scan_repository,
 )
