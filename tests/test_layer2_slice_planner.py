@@ -289,3 +289,235 @@ class TestAuditRemediationLayer2:
         with pytest.raises(TypeError, match="integer"):
             build_modernization_plan({"mod.a": True}, empty_edges, token_budget=16000)
 
+
+class TestAuditRound2Layer2:
+    def test_src_layout_and_multi_package_monorepo_resolution(self) -> None:
+        """Bug 5 (Probe 9): Root src/, nested packages/*/src/, and Maven */src/main/java/ resolve cleanly."""
+        files = (
+            FileRecord(
+                rel_path="packages/core/src/core/db.py",
+                module_id="packages.core.src.core.db",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=400,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=(),
+            ),
+            FileRecord(
+                rel_path="packages/core/src/core/api.py",
+                module_id="packages.core.src.core.api",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=600,
+                shannon_entropy=4.1,
+                max_line_length=70,
+                imports=("core.db", "core.db.query"),
+            ),
+            FileRecord(
+                rel_path="billing/src/main/java/com/acme/Repo.java",
+                module_id="billing.src.main.java.com.acme.Repo",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=500,
+                shannon_entropy=4.0,
+                max_line_length=70,
+                imports=(),
+            ),
+            FileRecord(
+                rel_path="billing/src/main/java/com/acme/Billing.java",
+                module_id="billing.src.main.java.com.acme.Billing",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=700,
+                shannon_entropy=4.1,
+                max_line_length=75,
+                imports=("com.acme.Repo",),
+            ),
+        )
+        scan = ScanSummary(
+            root_path="/tmp/fake_repo",
+            files=files,
+            active_tokens=2200,
+            pruned_tokens=0,
+            quarantined_tokens=0,
+            token_reduction_ratio=0.0,
+            symlink_loops_skipped=(),
+            recommended_exclusions=(),
+        )
+        plan = plan_from_scan(scan, token_budget=16000)
+        node_map = {n.scc_id: n for n in plan.condensation_nodes}
+        assert node_map["packages.core.src.core.db"].wave == 0
+        assert node_map["packages.core.src.core.api"].wave == 1
+        assert node_map["billing.src.main.java.com.acme.Repo"].wave == 0
+        assert node_map["billing.src.main.java.com.acme.Billing"].wave == 1
+
+    def test_python_init_reexports_do_not_create_false_cycles(self) -> None:
+        """Bug 4 (Probe 6 & 7): Standard Python package __init__.py re-exports must not trigger false cycles."""
+        files = (
+            FileRecord(
+                rel_path="pkg/__init__.py",
+                module_id="pkg",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=100,
+                shannon_entropy=3.8,
+                max_line_length=50,
+                imports=("pkg.service", "pkg.service.UserService"),
+            ),
+            FileRecord(
+                rel_path="pkg/service.py",
+                module_id="pkg.service",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=500,
+                shannon_entropy=4.1,
+                max_line_length=70,
+                imports=("pkg.models", "pkg.models.User", "pkg.unknown_const"),
+            ),
+            FileRecord(
+                rel_path="pkg/models.py",
+                module_id="pkg.models",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=300,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=(),
+            ),
+        )
+        scan = ScanSummary(
+            root_path="/tmp/fake_repo",
+            files=files,
+            active_tokens=900,
+            pruned_tokens=0,
+            quarantined_tokens=0,
+            token_reduction_ratio=0.0,
+            symlink_loops_skipped=(),
+            recommended_exclusions=(),
+        )
+        plan = plan_from_scan(scan, token_budget=16000)
+        assert plan.cyclic_knot_count == 0
+        node_map = {n.scc_id: n for n in plan.condensation_nodes}
+        assert node_map["pkg.models"].wave == 0
+        assert node_map["pkg.service"].wave == 1
+        assert node_map["pkg"].wave == 2
+
+    def test_typescript_index_barrel_and_reexport_wave_resolution(self) -> None:
+        """Bug 5 (Probe 3): TypeScript index.ts barrel imports (./auth -> src.auth.index) resolve waves."""
+        files = (
+            FileRecord(
+                rel_path="src/auth/service.ts",
+                module_id="src.auth.service",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=400,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=(),
+            ),
+            FileRecord(
+                rel_path="src/auth/index.ts",
+                module_id="src.auth.index",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=200,
+                shannon_entropy=3.9,
+                max_line_length=50,
+                imports=("./service", "src.auth.service"),
+            ),
+            FileRecord(
+                rel_path="src/app.ts",
+                module_id="src.app",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=500,
+                shannon_entropy=4.1,
+                max_line_length=70,
+                imports=("./auth", "src.auth"),
+            ),
+        )
+        scan = ScanSummary(
+            root_path="/tmp/fake_repo",
+            files=files,
+            active_tokens=1100,
+            pruned_tokens=0,
+            quarantined_tokens=0,
+            token_reduction_ratio=0.0,
+            symlink_loops_skipped=(),
+            recommended_exclusions=(),
+        )
+        plan = plan_from_scan(scan, token_budget=16000)
+        node_map = {n.scc_id: n for n in plan.condensation_nodes}
+        assert node_map["src.auth.service"].wave == 0
+        assert node_map["src.auth.index"].wave == 1
+        assert node_map["src.app"].wave == 2
+
+    def test_go_module_prefix_and_package_directory_wave_resolution(self) -> None:
+        """Bug 5 (Probe 2): Go package directory imports ('myrepo/pkg/router') resolve to pkg/router/*.go."""
+        files = (
+            FileRecord(
+                rel_path="pkg/db/conn.go",
+                module_id="pkg.db.conn",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=400,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=("database/sql",),
+            ),
+            FileRecord(
+                rel_path="pkg/router/router.go",
+                module_id="pkg.router.router",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=500,
+                shannon_entropy=4.1,
+                max_line_length=70,
+                imports=("github.com/acme/myrepo/pkg/db", "github.com.acme.myrepo.pkg.db"),
+            ),
+            FileRecord(
+                rel_path="cmd/server/main.go",
+                module_id="cmd.server.main",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=300,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=("github.com/acme/myrepo/pkg/router", "github.com.acme.myrepo.pkg.router"),
+            ),
+        )
+        scan = ScanSummary(
+            root_path="/tmp/fake_repo",
+            files=files,
+            active_tokens=1200,
+            pruned_tokens=0,
+            quarantined_tokens=0,
+            token_reduction_ratio=0.0,
+            symlink_loops_skipped=(),
+            recommended_exclusions=(),
+        )
+        plan = plan_from_scan(scan, token_budget=16000)
+        node_map = {n.scc_id: n for n in plan.condensation_nodes}
+        assert node_map["pkg.db.conn"].wave == 0
+        assert node_map["pkg.router.router"].wave == 1
+        assert node_map["cmd.server.main"].wave == 2
+
+    def test_scc_id_no_collision_when_module_name_contains_plus(self) -> None:
+        """Bug 6 (Probe 8): A module containing '+' must never collide with a multi-node SCC ID."""
+        modules = {"a": 500, "b": 500, "a+b": 500}
+        edges: dict[str, set[str]] = {
+            "a": {"b"},
+            "b": {"a"},
+            "a+b": {"a"},
+        }
+        plan = build_modernization_plan(modules, edges, token_budget=16000)
+        assert len(plan.condensation_nodes) == 2
+        assert len({n.scc_id for n in plan.condensation_nodes}) == 2
+        assert plan.cyclic_knot_count == 1
+        assert plan.max_wave_depth == 1
+        single_node = next(n for n in plan.condensation_nodes if not n.is_cyclic)
+        assert single_node.modules == ("a+b",)
+        assert single_node.wave == 1
+
+

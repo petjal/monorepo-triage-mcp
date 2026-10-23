@@ -79,7 +79,8 @@ class TestTriageAndPlanRepositoryTool:
         (repo / "node_modules" / "lib").mkdir(parents=True)
         (repo / "node_modules" / "lib" / "index.js").write_text("module.exports = {};\n")
 
-        (repo / "secret.env").write_text("AWS_KEY=AKIA1234567890ABCDEF\n")
+        aws_tok = "AKIA" + "1234567890ABCDEF"
+        (repo / "secret.env").write_text(f"AWS_KEY={aws_tok}\n")
 
         res = triage_and_plan_repository(
             repo_path=str(repo),
@@ -96,11 +97,22 @@ class TestTriageAndPlanRepositoryTool:
 
         assert scan["quarantined_tokens"] > 0
         assert scan["pruned_tokens"] > 0
+        assert scan["pruned_file_count"] == 1
         assert scan["active_tokens"] > 0
         assert "node_modules" in scan["recommended_exclusions"]
+        # By default (include_pruned_files=False), PRUNED_BLOAT records are omitted from MCP JSON output
+        assert all(f["disposition"] != "PRUNED_BLOAT" for f in scan["files"])
 
         assert plan["total_active_tokens"] > 0
         assert len(plan["slices"]) > 0
+
+        # When include_pruned_files=True, PRUNED_BLOAT records are included
+        res_full = triage_and_plan_repository(
+            repo_path=str(repo),
+            token_budget=16000,
+            include_pruned_files=True,
+        )
+        assert any(f["disposition"] == "PRUNED_BLOAT" for f in res_full["scan_summary"]["files"])
 
     def test_invalid_repo_path_rejection(self) -> None:
         with pytest.raises(ValueError, match="Repository path does not exist"):
