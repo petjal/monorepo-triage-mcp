@@ -10,6 +10,7 @@ from typing import Literal
 
 from monorepo_triage.layer0_invariants import (
     estimate_source_tokens,
+    resolve_confined_path,
     shannon_entropy_bits_per_byte,
     validate_entropy_threshold,
     validate_line_length_limit,
@@ -28,6 +29,10 @@ BLOAT_DIR_NAMES: frozenset[str] = frozenset(
         ".git",
         ".venv",
         "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
     }
 )
 
@@ -86,6 +91,14 @@ def compute_module_id(rel_path: str) -> str:
     return ".".join(parts)
 
 
+def _strip_c_style_comments(text: str) -> str:
+    """Strip // and /* */ comments while preserving string literals."""
+    pattern = re.compile(
+        r"""('(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")|(/\*[\s\S]*?\*/|//[^\r\n]*)"""
+    )
+    return pattern.sub(lambda m: m.group(1) if m.group(1) is not None else "", text)
+
+
 def extract_python_imports(text: str, rel_path: str) -> tuple[str, ...]:
     """Extract Python imports using AST, resolving relative imports deterministically."""
     try:
@@ -104,13 +117,22 @@ def extract_python_imports(text: str, rel_path: str) -> tuple[str, ...]:
             base_parts: list[str] = []
             if node.level > 0:
                 trim = node.level - 1
-                if trim <= len(parent_parts):
-                    base_parts = parent_parts[: len(parent_parts) - trim]
+                if trim > len(parent_parts):
+                    continue
+                base_parts = parent_parts[: len(parent_parts) - trim]
             if node.module:
                 base_parts.extend(node.module.split("."))
 
             base_mod = ".".join(base_parts)
-            if base_mod:
+            if node.module is None:
+                for alias in node.names:
+                    if alias.name == "*":
+                        if base_mod:
+                            extracted.add(base_mod)
+                    else:
+                        target = f"{base_mod}.{alias.name}" if base_mod else alias.name
+                        extracted.add(target)
+            elif base_mod:
                 extracted.add(base_mod)
                 for alias in node.names:
                     if alias.name != "*":
@@ -120,14 +142,15 @@ def extract_python_imports(text: str, rel_path: str) -> tuple[str, ...]:
 
 
 def extract_ts_js_imports(text: str, rel_path: str) -> tuple[str, ...]:
-    """Extract TypeScript and JavaScript import targets."""
+    """Extract TypeScript and JavaScript import and export-from targets."""
+    clean_text = _strip_c_style_comments(text)
     extracted: set[str] = set()
     pattern = re.compile(
-        r"""(?:import\s+[\w\s{},*]+\s+from\s+['"]([^'"]+)['"]|import\s*\(['"]([^'"]+)['"]\)|import\s+['"]([^'"]+)['"]|require\s*\(['"]([^'"]+)['"]\))"""
+        r"""(?:(?:import|export)\s+[\w$\s{},*]+\s+from\s+['"]([^'"]+)['"]|import\s*\(['"]([^'"]+)['"]\)|import\s+['"]([^'"]+)['"]|require\s*\(['"]([^'"]+)['"]\))"""
     )
     parent_dir = Path(rel_path).parent
 
-    for match in pattern.finditer(text):
+    for match in pattern.finditer(clean_text):
         target = next(g for g in match.groups() if g is not None)
         extracted.add(target)
         if target.startswith(("./", "../")):
@@ -140,10 +163,11 @@ def extract_ts_js_imports(text: str, rel_path: str) -> tuple[str, ...]:
 
 
 def extract_go_imports(text: str) -> tuple[str, ...]:
-    """Extract Go import paths."""
+    """Extract Go import paths, ignoring comments and non-keyword identifiers."""
+    clean_text = _strip_c_style_comments(text)
     extracted: set[str] = set()
-    pattern = re.compile(r'import\s*(?:\(([\s\S]*?)\)|"([^"]+)")')
-    for match in pattern.finditer(text):
+    pattern = re.compile(r'\bimport\s*(?:\(([\s\S]*?)\)|"([^"]+)")')
+    for match in pattern.finditer(clean_text):
         block, single = match.groups()
         if single:
             extracted.add(single)
@@ -156,10 +180,11 @@ def extract_go_imports(text: str) -> tuple[str, ...]:
 
 
 def extract_java_imports(text: str) -> tuple[str, ...]:
-    """Extract Java import statements."""
+    """Extract Java import statements, ignoring comments."""
+    clean_text = _strip_c_style_comments(text)
     extracted: set[str] = set()
-    pattern = re.compile(r"import\s+(?:static\s+)?([a-zA-Z0-9_.]+);")
-    for match in pattern.finditer(text):
+    pattern = re.compile(r"\bimport\s+(?:static\s+)?([a-zA-Z0-9_.]+);")
+    for match in pattern.finditer(clean_text):
         extracted.add(match.group(1))
     return tuple(sorted(extracted))
 
@@ -187,9 +212,7 @@ def scan_repository(
     valid_max_line = validate_line_length_limit(max_line_length)
     valid_entropy_th = validate_entropy_threshold(entropy_threshold)
 
-    visited_dir_inodes: set[tuple[int, int]] = set()
     root_stat = resolved_root.stat()
-    visited_dir_inodes.add((root_stat.st_dev, root_stat.st_ino))
 
     skipped_symlinks: list[str] = []
     found_files: list[Path] = []
@@ -203,23 +226,14 @@ def scan_repository(
         for entry in entries:
             rel_str = str(entry.relative_to(resolved_root))
             if entry.is_symlink():
+                # Validate confinement via Layer 0 and skip all symlinks (directory, file, or broken)
+                # so canonical physical files are never double-counted or shadowed.
                 try:
-                    target_resolved = entry.resolve()
-                except (OSError, RuntimeError):
-                    skipped_symlinks.append(rel_str)
-                    continue
-
-                if not target_resolved.is_relative_to(resolved_root):
-                    skipped_symlinks.append(rel_str)
-                    continue
-
-                if target_resolved.is_dir():
-                    # Never recurse into directory symlinks: prevents both ancestor loops
-                    # and alphabetical symlink shadowing of canonical physical directories.
-                    skipped_symlinks.append(rel_str)
-                    continue
-                elif target_resolved.is_file():
-                    found_files.append(entry)
+                    _ = resolve_confined_path(resolved_root, entry)
+                except (OSError, RuntimeError, ValueError):
+                    pass
+                skipped_symlinks.append(rel_str)
+                continue
             elif entry.is_dir():
                 try:
                     st = entry.stat()
@@ -227,7 +241,6 @@ def scan_repository(
                     if inode_key in active_dir_chain:
                         skipped_symlinks.append(rel_str)
                         continue
-                    visited_dir_inodes.add(inode_key)
                     collect_files(entry, active_dir_chain | {inode_key})
                 except (OSError, PermissionError):
                     continue
@@ -241,6 +254,43 @@ def scan_repository(
 
     for file_path in sorted(found_files, key=lambda p: str(p.relative_to(resolved_root))):
         rel_path = str(file_path.relative_to(resolved_root))
+        path_parts = Path(rel_path).parts[:-1]
+
+        # 1. Vendored, build, and cache directory pruning (checked FIRST before reading or DLP)
+        bloat_idx = next(
+            (i for i, part in enumerate(path_parts) if part in BLOAT_DIR_NAMES),
+            None,
+        )
+        if bloat_idx is not None:
+            bloat_rel_dir = "/".join(path_parts[: bloat_idx + 1])
+            recommended_set.add(bloat_rel_dir)
+            try:
+                f_size = file_path.stat().st_size
+                if f_size <= MAX_SOURCE_FILE_BYTES:
+                    b_data = file_path.read_bytes()
+                    b_tokens = estimate_source_tokens(b_data.decode("utf-8", errors="replace"))
+                    b_entropy = shannon_entropy_bits_per_byte(b_data)
+                else:
+                    b_tokens = max(1, f_size // 4)
+                    b_entropy = 0.0
+            except (OSError, PermissionError):
+                b_tokens = 1
+                b_entropy = 0.0
+            records.append(
+                FileRecord(
+                    rel_path=rel_path,
+                    module_id=None,
+                    disposition="PRUNED_BLOAT",
+                    reason="vendored_or_build_dir",
+                    estimated_tokens=b_tokens,
+                    shannon_entropy=b_entropy,
+                    max_line_length=0,
+                    imports=(),
+                )
+            )
+            continue
+
+        # 2. Read file bytes safely; prune unreadable files instead of creating 0-token active modules
         try:
             file_size = file_path.stat().st_size
             if file_size > MAX_SOURCE_FILE_BYTES:
@@ -250,9 +300,21 @@ def scan_repository(
                 raw_bytes = file_path.read_bytes()
                 is_oversized = False
         except (OSError, PermissionError):
-            raw_bytes = b""
-            is_oversized = False
+            records.append(
+                FileRecord(
+                    rel_path=rel_path,
+                    module_id=None,
+                    disposition="PRUNED_BLOAT",
+                    reason="unreadable_file",
+                    estimated_tokens=0,
+                    shannon_entropy=0.0,
+                    max_line_length=0,
+                    imports=(),
+                )
+            )
+            continue
 
+        # 3. Binary or oversized blob check
         is_binary = is_oversized or (b"\x00" in raw_bytes[:BINARY_SNIFF_BYTES])
         if is_binary:
             est_tokens = max(1, file_size // 4) if is_oversized else max(1, len(raw_bytes) // 4)
@@ -276,7 +338,7 @@ def scan_repository(
         entropy = shannon_entropy_bits_per_byte(raw_bytes)
         est_tokens = estimate_source_tokens(text)
 
-        # 1. Zero-Trust DLP Quarantine check
+        # 4. Zero-Trust DLP Quarantine check
         if (
             PEM_PATTERN.search(text)
             or AWS_KEY_PATTERN.search(text)
@@ -288,25 +350,6 @@ def scan_repository(
                     module_id=None,
                     disposition="QUARANTINED_DLP",
                     reason="dlp_secret_pattern",
-                    estimated_tokens=est_tokens,
-                    shannon_entropy=entropy,
-                    max_line_length=max_line,
-                    imports=(),
-                )
-            )
-            continue
-
-        # 2. Vendored and build directory pruning
-        path_parts = Path(rel_path).parts[:-1]
-        if any(part in BLOAT_DIR_NAMES for part in path_parts):
-            if path_parts:
-                recommended_set.add(path_parts[0])
-            records.append(
-                FileRecord(
-                    rel_path=rel_path,
-                    module_id=None,
-                    disposition="PRUNED_BLOAT",
-                    reason="vendored_or_build_dir",
                     estimated_tokens=est_tokens,
                     shannon_entropy=entropy,
                     max_line_length=max_line,
