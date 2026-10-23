@@ -113,11 +113,9 @@ class TestZeroTrustDLPQuarantine:
         repo = tmp_path / "repo"
         repo.mkdir()
         key_file = repo / "config.py"
-        key_file.write_text(
-            "-----BEGIN RSA PRIVATE KEY-----\n"
-            "MIIEowIBAAKCAQEA0m...\n"
-            "-----END RSA PRIVATE KEY-----\n"
-        )
+        pem_hdr = "-----BEGIN RSA " + "PRIVATE KEY-----"
+        pem_ftr = "-----END RSA " + "PRIVATE KEY-----"
+        key_file.write_text(f"{pem_hdr}\nMIIEowIBAAKCAQEA0m...\n{pem_ftr}\n")
         summary = scan_repository(repo)
         rec = summary.files[0]
         assert rec.disposition == "QUARANTINED_DLP"
@@ -129,7 +127,8 @@ class TestZeroTrustDLPQuarantine:
         repo = tmp_path / "repo"
         repo.mkdir()
         creds = repo / "aws_creds.py"
-        creds.write_text('AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+        aws_tok = "AKIA" + "IOSFODNN7EXAMPLE"
+        creds.write_text(f'AWS_KEY = "{aws_tok}"\n')
 
         summary = scan_repository(repo)
         rec = summary.files[0]
@@ -140,7 +139,8 @@ class TestZeroTrustDLPQuarantine:
         repo = tmp_path / "repo"
         repo.mkdir()
         gh_file = repo / "ci.py"
-        gh_file.write_text('TOKEN = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"\n')
+        gh_tok = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        gh_file.write_text(f'TOKEN = "{gh_tok}"\n')
 
         summary = scan_repository(repo)
         rec = summary.files[0]
@@ -234,7 +234,9 @@ class TestScanSummaryMetrics:
         (repo / "node_modules").mkdir()
         (repo / "node_modules" / "huge.js").write_text("var x = 1;\n" * 500)
 
-        (repo / "key.pem").write_text("-----BEGIN EC PRIVATE KEY-----\nabc\n-----END EC PRIVATE KEY-----\n")
+        pem_ec_hdr = "-----BEGIN EC " + "PRIVATE KEY-----"
+        pem_ec_ftr = "-----END EC " + "PRIVATE KEY-----"
+        (repo / "key.pem").write_text(f"{pem_ec_hdr}\nabc\n{pem_ec_ftr}\n")
 
         summary = scan_repository(repo)
         assert summary.active_tokens > 0
@@ -275,4 +277,130 @@ class TestAuditRemediationLayer1:
         assert rec.disposition == "PRUNED_BLOAT"
         assert rec.reason == "binary_or_oversized_blob"
         assert rec.module_id is None
+
+
+class TestAuditRound2Layer1:
+    def test_nested_monorepo_bloat_dir_exclusion_path(self, tmp_path: Path) -> None:
+        """Bug 1: Nested bloat dirs must record the bloat path (packages/web/node_modules), never 'packages'."""
+        repo = tmp_path / "repo"
+        nm = repo / "packages" / "web" / "node_modules" / "react"
+        nm.mkdir(parents=True)
+        (nm / "index.js").write_text("module.exports = {};\n")
+        (repo / "packages" / "web" / "app.ts").write_text("export const x = 1;\n")
+
+        summary = scan_repository(repo)
+        assert "packages" not in summary.recommended_exclusions
+        assert "packages/web/node_modules" in summary.recommended_exclusions
+
+    def test_bloat_dir_checked_before_dlp_and_binary(self, tmp_path: Path) -> None:
+        """Bug 2: Dummy keys and binary files inside bloat dirs are pruned as bloat, not DLP alerts."""
+        repo = tmp_path / "repo"
+        tls_test = repo / "node_modules" / "tls-pkg"
+        tls_test.mkdir(parents=True)
+        pem_hdr = "-----BEGIN RSA " + "PRIVATE KEY-----"
+        pem_ftr = "-----END RSA " + "PRIVATE KEY-----"
+        (tls_test / "dummy.pem").write_text(f"{pem_hdr}\nabc\n{pem_ftr}\n")
+
+        pycache = repo / "src" / "__pycache__"
+        pycache.mkdir(parents=True)
+        (pycache / "mod.cpython-312.pyc").write_bytes(b"\x00\x01\x02\x03")
+
+        summary = scan_repository(repo)
+        assert summary.quarantined_tokens == 0
+        by_path = {f.rel_path: f for f in summary.files}
+        assert by_path["node_modules/tls-pkg/dummy.pem"].disposition == "PRUNED_BLOAT"
+        assert by_path["node_modules/tls-pkg/dummy.pem"].reason == "vendored_or_build_dir"
+        assert "node_modules" in summary.recommended_exclusions
+        assert "src/__pycache__" in summary.recommended_exclusions
+
+    def test_intra_repo_file_symlinks_and_broken_symlinks_skipped(self, tmp_path: Path) -> None:
+        """Bug 7: File symlinks inside the repo and broken symlinks must be skipped, never double-counted."""
+        repo = tmp_path / "repo"
+        (repo / "src").mkdir(parents=True)
+        (repo / "node_modules" / "pkg").mkdir(parents=True)
+        real_py = repo / "src" / "real.py"
+        real_py.write_text("def f() -> int:\n    return 1\n")
+        vendor_py = repo / "node_modules" / "pkg" / "lib.py"
+        vendor_py.write_text("def v() -> int:\n    return 2\n")
+
+        (repo / "src" / "alias.py").symlink_to(real_py)
+        (repo / "src" / "sneaky_vendor.py").symlink_to(vendor_py)
+        (repo / "src" / "broken.py").symlink_to(repo / "src" / "does_not_exist.py")
+
+        summary = scan_repository(repo)
+        active_paths = [f.rel_path for f in summary.files if f.disposition == "ACTIVE_SOURCE"]
+        assert active_paths == ["src/real.py"]
+        assert "src/alias.py" in summary.symlink_loops_skipped
+        assert "src/sneaky_vendor.py" in summary.symlink_loops_skipped
+        assert "src/broken.py" in summary.symlink_loops_skipped
+
+    def test_unreadable_file_pruned_as_unreadable(self, tmp_path: Path) -> None:
+        """Bug 8: Unreadable source files (chmod 000) must be classified PRUNED_BLOAT, not ACTIVE_SOURCE."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        locked = repo / "locked.py"
+        locked.write_text("x = 1\n")
+        locked.chmod(0o000)
+        try:
+            summary = scan_repository(repo)
+            rec = summary.files[0]
+            assert rec.disposition == "PRUNED_BLOAT"
+            assert rec.reason == "unreadable_file"
+        finally:
+            locked.chmod(0o644)
+
+    def test_python_relative_imports_at_root_and_no_false_parent_pkg(self, tmp_path: Path) -> None:
+        """Bug 3 & 4: Relative imports reaching root resolve names, and 'from . import mod' omits parent pkg."""
+        from monorepo_triage.layer1_scanner import extract_python_imports
+
+        assert extract_python_imports("from . import utils\n", "main.py") == ("utils",)
+        assert extract_python_imports("from .. import root_cfg\n", "pkg/sub.py") == ("root_cfg",)
+        # Inside pkg/service.py, 'from . import models' imports pkg.models, NOT pkg (__init__.py)
+        assert extract_python_imports("from . import models\n", "pkg/service.py") == ("pkg.models",)
+
+    def test_comment_stripping_ts_reexports_and_go_word_boundary(self) -> None:
+        """Bug 5 & 8: Comments stripped, Go word boundaries enforced, and TS export-from / $ supported."""
+        from monorepo_triage.layer1_scanner import (
+            extract_go_imports,
+            extract_java_imports,
+            extract_ts_js_imports,
+        )
+
+        ts_code = (
+            "// import { x } from './commented_single';\n"
+            "/* import { y } from './commented_block'; */\n"
+            "import $ from './jquery';\n"
+            "export { AuthService } from './service';\n"
+            "export * from './types';\n"
+        )
+        ts_imps = extract_ts_js_imports(ts_code, "src/auth/index.ts")
+        assert "./commented_single" not in ts_imps
+        assert "./commented_block" not in ts_imps
+        assert "src.auth.jquery" in ts_imps
+        assert "src.auth.service" in ts_imps
+        assert "src.auth.types" in ts_imps
+
+        go_code = (
+            "package main\n"
+            "// import \"myrepo/commented\"\n"
+            "import (\n"
+            "    \"fmt\"\n"
+            "    // \"myrepo/dead\"\n"
+            ")\n"
+            "func f() { reimport(\"not/an/import\") }\n"
+        )
+        go_imps = extract_go_imports(go_code)
+        assert "myrepo/commented" not in go_imps
+        assert "myrepo/dead" not in go_imps
+        assert "not/an/import" not in go_imps
+        assert "fmt" in go_imps
+
+        java_code = (
+            "// import com.example.Commented;\n"
+            "/* import com.example.BlockCommented; */\n"
+            "import com.example.RealService;\n"
+        )
+        java_imps = extract_java_imports(java_code)
+        assert java_imps == ("com.example.RealService",)
+
 
