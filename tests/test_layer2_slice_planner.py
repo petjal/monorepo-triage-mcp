@@ -1,0 +1,223 @@
+"""Tests for Layer 2: Tarjan SCC Condensation, DAG Wave Assignment, and Slice Bin-Packing."""
+
+from monorepo_triage.layer1_scanner import FileRecord, ScanSummary
+from monorepo_triage.layer2_slice_planner import (
+    build_modernization_plan,
+    plan_from_scan,
+)
+
+
+class TestTarjanSCCCondensation:
+    def test_acyclic_dag_singletons(self) -> None:
+        modules = {"app.main": 1000, "app.service": 2000, "app.db": 3000}
+        # app.main depends on app.service, app.service depends on app.db
+        edges = {
+            "app.main": {"app.service"},
+            "app.service": {"app.db"},
+            "app.db": set(),
+        }
+
+        plan = build_modernization_plan(modules, edges, token_budget=16000)
+        assert len(plan.condensation_nodes) == 3
+        assert plan.cyclic_knot_count == 0
+        assert all(not node.is_cyclic for node in plan.condensation_nodes)
+
+        # Check nodes are present
+        node_map = {n.scc_id: n for n in plan.condensation_nodes}
+        assert "app.db" in node_map
+        assert "app.service" in node_map
+        assert "app.main" in node_map
+
+    def test_cyclic_knot_detection(self) -> None:
+        modules = {
+            "auth.service": 1200,
+            "auth.session": 800,
+            "user.model": 1500,
+            "billing.core": 900,
+        }
+        # Cycle between auth.service and auth.session; both depend on user.model
+        edges = {
+            "auth.service": {"auth.session", "user.model"},
+            "auth.session": {"auth.service", "user.model"},
+            "user.model": set(),
+            "billing.core": {"user.model"},
+        }
+
+        plan = build_modernization_plan(modules, edges, token_budget=16000)
+        assert plan.cyclic_knot_count == 1
+
+        cyclic_node = next(n for n in plan.condensation_nodes if n.is_cyclic)
+        assert set(cyclic_node.modules) == {"auth.service", "auth.session"}
+        assert cyclic_node.total_tokens == 2000
+        assert "user.model" in cyclic_node.depends_on_sccs
+
+    def test_self_loop_marked_cyclic(self) -> None:
+        modules = {"recursive.worker": 500}
+        edges = {"recursive.worker": {"recursive.worker"}}
+
+        plan = build_modernization_plan(modules, edges, token_budget=16000)
+        assert plan.cyclic_knot_count == 1
+        node = plan.condensation_nodes[0]
+        assert node.is_cyclic is True
+        assert node.modules == ("recursive.worker",)
+
+
+class TestKahnBottomUpWaveAssignment:
+    def test_bottom_up_wave_levels(self) -> None:
+        # Architecture:
+        # Wave 0 (leaves, no deps): db, telemetry
+        # Wave 1 (depends on wave 0): cache (-> db), auth (-> db)
+        # Wave 2 (depends on wave 1): api (-> auth, cache)
+        # Wave 3 (depends on wave 2): gateway (-> api)
+        modules = {
+            "infra.db": 1000,
+            "infra.telemetry": 1000,
+            "core.cache": 1000,
+            "core.auth": 1000,
+            "service.api": 1000,
+            "edge.gateway": 1000,
+        }
+        edges = {
+            "infra.db": set(),
+            "infra.telemetry": set(),
+            "core.cache": {"infra.db"},
+            "core.auth": {"infra.db"},
+            "service.api": {"core.auth", "core.cache"},
+            "edge.gateway": {"service.api"},
+        }
+
+        plan = build_modernization_plan(modules, edges, token_budget=16000)
+        node_map = {n.scc_id: n for n in plan.condensation_nodes}
+
+        assert node_map["infra.db"].wave == 0
+        assert node_map["infra.telemetry"].wave == 0
+        assert node_map["core.cache"].wave == 1
+        assert node_map["core.auth"].wave == 1
+        assert node_map["service.api"].wave == 2
+        assert node_map["edge.gateway"].wave == 3
+        assert plan.max_wave_depth == 3
+
+
+class TestDeterministicSliceBinPacking:
+    def test_ffd_packing_within_wave(self) -> None:
+        # All in wave 0 (no dependencies)
+        modules = {
+            "mod.a": 4000,
+            "mod.b": 3500,
+            "mod.c": 3000,
+            "mod.d": 2000,
+        }
+        edges = {m: set() for m in modules}
+
+        # Budget = 9000
+        # FFD sorts: mod.a (4000), mod.b (3500), mod.c (3000), mod.d (2000)
+        # Slice 1: mod.a (4000) + mod.b (3500) = 7500. mod.c (3000) doesn't fit (10500 > 9000).
+        #          mod.d (2000) fits! Total = 9500? Wait, 7500+2000 = 9500 > 9000! Doesn't fit!
+        # Let's check budget = 10000:
+        # Slice 1: mod.a (4000) + mod.b (3500) = 7500. mod.d (2000) fits: 7500 + 2000 = 9500 <= 10000.
+        # Slice 2: mod.c (3000)
+        plan = build_modernization_plan(modules, edges, token_budget=10000)
+
+        assert len(plan.slices) == 2
+        assert all(s.wave == 0 for s in plan.slices)
+        assert all(s.status == "READY" for s in plan.slices)
+
+        s1 = next(s for s in plan.slices if "mod.a" in s.modules)
+        assert "mod.b" in s1.modules
+        assert "mod.d" in s1.modules
+        assert s1.total_tokens == 9500
+
+        s2 = next(s for s in plan.slices if "mod.c" in s.modules)
+        assert s2.total_tokens == 3000
+
+    def test_waves_never_mixed_in_same_slice(self) -> None:
+        modules = {
+            "leaf.mod": 500,
+            "parent.mod": 500,
+        }
+        edges = {
+            "leaf.mod": set(),
+            "parent.mod": {"leaf.mod"},
+        }
+        # Even with generous budget 16000, wave 0 and wave 1 must be separate slices
+        plan = build_modernization_plan(modules, edges, token_budget=16000)
+        assert len(plan.slices) == 2
+        assert {s.wave for s in plan.slices} == {0, 1}
+
+    def test_oversized_coupled_knot_flagging(self) -> None:
+        modules = {
+            "monolith.heavy": 25000,
+            "light.helper": 1000,
+        }
+        edges = {
+            "monolith.heavy": set(),
+            "light.helper": set(),
+        }
+
+        # Budget = 16000
+        plan = build_modernization_plan(modules, edges, token_budget=16000)
+        oversized = [s for s in plan.slices if s.status == "OVERSIZED_COUPLED_KNOT"]
+        assert len(oversized) == 1
+        assert oversized[0].modules == ("monolith.heavy",)
+        assert oversized[0].total_tokens == 25000
+
+        ready = [s for s in plan.slices if s.status == "READY"]
+        assert len(ready) == 1
+        assert ready[0].modules == ("light.helper",)
+
+
+class TestPlanFromScanIntegration:
+    def test_plan_derived_from_scan_summary(self) -> None:
+        files = (
+            FileRecord(
+                rel_path="src/infra/db.py",
+                module_id="src.infra.db",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=1500,
+                shannon_entropy=4.2,
+                max_line_length=80,
+                imports=(),
+            ),
+            FileRecord(
+                rel_path="src/service/api.py",
+                module_id="src.service.api",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=2500,
+                shannon_entropy=4.3,
+                max_line_length=90,
+                imports=("src.infra.db", "external_lib"),
+            ),
+            FileRecord(
+                rel_path="node_modules/foo/index.js",
+                module_id=None,
+                disposition="PRUNED_BLOAT",
+                reason="vendored_or_build_dir",
+                estimated_tokens=5000,
+                shannon_entropy=5.0,
+                max_line_length=100,
+                imports=(),
+            ),
+        )
+        scan = ScanSummary(
+            root_path="/tmp/fake_repo",
+            files=files,
+            active_tokens=4000,
+            pruned_tokens=5000,
+            quarantined_tokens=0,
+            token_reduction_ratio=0.5556,
+            symlink_loops_skipped=(),
+            recommended_exclusions=("node_modules",),
+        )
+
+        plan = plan_from_scan(scan, token_budget=16000)
+        assert plan.total_active_tokens == 4000
+        assert len(plan.condensation_nodes) == 2
+
+        node_map = {n.scc_id: n for n in plan.condensation_nodes}
+        assert "src.infra.db" in node_map
+        assert "src.service.api" in node_map
+        assert node_map["src.infra.db"].wave == 0
+        assert node_map["src.service.api"].wave == 1
+        assert "src.infra.db" in node_map["src.service.api"].depends_on_sccs
