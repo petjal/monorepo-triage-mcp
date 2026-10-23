@@ -76,3 +76,29 @@ Instead, the pre-flight report prescribes a concrete **3-Phase Execution Plan**:
    * Assign a senior architect to decouple 2–3 high-fanout bridge modules inside the 153-module knot (specifically lazy-loading `django.conf.settings`, `django.apps.registry`, and `django.urls` imports from `django.db.models` and `django.forms`) so the `628,301`-token SCC fractures into independent sub-packages under `120,000` tokens each.
 3. **Phase 3 — Full Parallel Rollout (`Waves 6..23`):**
    * Once the Wave 5 seam is carved, release the parallel agent swarm across the remaining 18 waves (`django.contrib.postgres`, `django.contrib.admin`, `django.contrib.gis`, and the test suite), where all 15 remaining subsystem knots are already verified `READY` (`< 100,000` tokens each).
+
+---
+
+## 4. Runnable End-to-End "80/20" Enterprise Sprint PoC (`examples/run_django_sprint_demo.py`)
+
+To demonstrate how the pre-flight scan connects to an actual **80% Autonomous / 20% Human** enterprise sprint, this repository includes a self-contained runnable simulation ([`examples/run_django_sprint_demo.py`](https://github.com/petjal/monorepo-triage-mcp/blob/master/examples/run_django_sprint_demo.py)):
+
+```bash
+PYTHONPATH=src python3 examples/run_django_sprint_demo.py
+```
+
+### The Simulated Sprint Scenario ("Sprint 42: Strict Type Modernization")
+A customer wants to modernize a legacy untyped Django subsystem (`django.utils` $\rightarrow$ `django.core.validators` $\rightarrow$ `django.contrib.postgres.fields`) to 100% PEP 484 type annotations so their CI pipeline can enforce `mypy --strict`:
+
+1. **Stage 1 & 2 — Pre-Flight Triage & Wave Blueprint (`monorepo-triage-mcp`):**
+   * Prunes `84.96%` of dead-weight tokens (`node_modules/admin-ui/bundle.js`).
+   * Quarantines a legacy RSA private key (`tests/postgres_tests/legacy_test_key.pem`) via the Layer 1 DLP gate before any code reaches an LLM.
+   * Detects the circular dependency knot between `django.utils.functional` and `django.utils.deprecation` at **Wave 1** and schedules a 4-wave bottom-up execution plan (`Wave 0` leaf utilities $\rightarrow$ `Wave 1` coupled knot $\rightarrow$ `Wave 2` core validators $\rightarrow$ `Wave 3` Postgres fields).
+2. **Stage 3 — The Autonomous "80%" Wave Swarm + Isolated Judge Pass:**
+   * Executes Wave 0 through Wave 3 in strict bottom-up order. At Wave 1, the autonomous worker carves a `from __future__ import annotations` + `if TYPE_CHECKING:` seam to break the circular type dependency between `functional.py` and `deprecation.py`.
+   * At the end of each wave, an isolated AST Judge verifies that 100% of functions and methods (`10/10`) carry complete parameter and return type annotations before unlocking the next wave.
+3. **Stage 4 — The "Final 20%" Human Engineer Last-Mile Handoff:**
+   * Rather than guessing on ambiguous business logic or touching quarantined secrets, the pipeline outputs a structured 3-item handoff manifest for the customer's human engineers:
+     * **Domain Policy Decision (`django/contrib/postgres/fields/ranges.py`):** Confirm whether `DateTimeRangeField(timezone_aware=None)` should raise `ValidationError` when `USE_TZ=False`.
+     * **DLP Secret Rotation (`tests/postgres_tests/legacy_test_key.pem`):** Replace the quarantined static RSA private key with an ephemeral runtime test fixture.
+     * **Architectural Seam Sign-Off (`functional.py <-> deprecation.py`):** Verify no external plugins rely on implicit runtime re-export attributes across the refactored Wave 1 knot.
