@@ -4,7 +4,8 @@
 **Workflow:** Spec-Driven Working Prototype -> Cold-Context Adversarial Red-Teaming & Systems Telemetry -> Regression Test Hardening  
 **Verification Baseline:** 85 passing unit tests (`pytest`), strict static typing (`mypy --strict`), zero lint violations (`ruff`)
 
-> **Reader Orientation (Internal Code QA vs. External Case Studies):**
+> **Reader Orientation (Internal Code QA vs. External Case Studies & Authorship):**
+> * **How This Was Built:** I supplied the enterprise repository-triage ideas, problem framing, and verification gates from my 16 years diagnosing source code scanners at Black Duck (`bds_bom_Partition`), and used Google Gemini / Antigravity (`gemini-3.8-flash` builders + cold-context `gemini-4-argon` auditors) to write all of the Python code, tests, benchmarks, and documentation.
 > * **This document (`VERIFICATION_LOG.md`)** records the adversarial code audits, 85-test regression suite, and systems performance profiling of **`monorepo-triage-mcp`'s own Python source code**.
 > * For sample pre-flight assessment reports of **external repositories (`trpc/trpc` and `django/django`)** generated **by** this tool (written for project sponsors and engagement architects), see **[`CASE_STUDIES.md`](https://github.com/petjal/monorepo-triage-mcp/blob/master/CASE_STUDIES.md)**.
 
