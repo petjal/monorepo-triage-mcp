@@ -27,9 +27,9 @@ Below are the side-by-side findings produced by `monorepo-triage-mcp` in under 3
 | **Non-Source / Vendor Bloat Pruned** | **804 files pruned (`63.89%` token reduction)** [Unseeded]<br>*4,805 files pruned (`64.36%` token reduction) [+4k synthetic]* | **4,103 files pruned (`56.35%` token reduction)** | Eliminates `1.37M` (`trpc`) and `7.28M` (`django`) dead-weight tokens prior to ingestion |
 | **Active Source Scope** | **852 TypeScript/JS modules** (`775,370` tokens)<br>*(condensed into 851 modules in DAG)* | **2,982 Python/JS modules** (`5,637,083` tokens)<br>*(condensed into 2,977 unique module IDs)* | True active engineering scope |
 | **DLP Secrets Quarantined** | `0` files | `0` files (`4` doc symlinks skipped) | Safe for enclave ingestion |
-| **Bottom-Up Execution Schedule** | **27 Waves (`Waves 0..26`)** (`21` slices @ 120k budget / `58` slices @ 16k budget) | **68 Waves (`Waves 0..67`)** (`59` slices @ 120k budget / `338` slices @ 16k budget) | Topological order for parallel agent swarm execution |
+| **Bottom-Up Execution Schedule** | **27 Waves (`Waves 0..26`)** (`28` slices @ 120k budget / `58` slices @ 16k budget) | **68 Waves (`Waves 0..67`)** (`97` slices @ 120k budget / `338` slices @ 16k budget) | Topological order for parallel agent swarm execution |
 | **Circular Dependency Knots (SCCs)** | **3 knots** (max: `103` modules / `73,199` tokens) | **3 database backend knots** (max: `3` modules / `16,519` tokens) | Both repositories are 100% swarm-ready at `120,000` tokens |
-| **Day-1 Engagement Disposition** | **GREEN LIGHT (`21/21` slices `READY`)** | **GREEN LIGHT (`59/59` slices `READY` @ 120k budget)** | True AST module-load traversal excludes function-local lazy imports |
+| **Day-1 Engagement Disposition** | **GREEN LIGHT (`28/28` slices `READY`)** | **GREEN LIGHT (`97/97` slices `READY` @ 120k budget)** | True AST module-load traversal excludes function-local lazy imports |
 
 ---
 
@@ -47,7 +47,7 @@ Below are the side-by-side findings produced by `monorepo-triage-mcp` in under 3
      * **Knot 3 (Wave 16):** Cross-package integration cycle between `packages.client.*`, `packages.next.*`, `packages.react-query.*`, and `packages.server.src.adapters.*` — `103` modules totaling **`73,199` tokens**.
    * Because even the largest knot (`73,199` tokens) is well beneath the `120,000`-token per-agent slice ceiling, **every knot can be ingested and refactored atomically by an agent worker (`status: READY`)**.
 3. **Swarm Execution Schedule:**
-   * All modules pack cleanly into **27 sequential waves (`Waves 0..26`)** across **21 `READY` slices** at `120,000` tokens (or 58 slices at `16,000` tokens), with **0 `OVERSIZED_COUPLED_KNOT` blockers**.
+   * All modules pack cleanly into **27 sequential waves (`Waves 0..26`)** across **28 `READY` slices** at `120,000` tokens (or 58 slices at `16,000` tokens), with **0 `OVERSIZED_COUPLED_KNOT` blockers** (enforcing the invariant that waves are never mixed across slices).
 
 ---
 

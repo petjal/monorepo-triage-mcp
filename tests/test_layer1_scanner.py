@@ -667,5 +667,22 @@ class TestAuditRound4Layer1:
         assert "myrepo/pkg/api" in imps5
         assert "myrepo/pkg/test" in imps5
 
+    def test_windows_backslash_paths_in_module_id_and_python_imports(self) -> None:
+        """Assert Windows backslash path separators do not corrupt module IDs or relative imports."""
+        from monorepo_triage.layer1_scanner import compute_module_id, extract_python_imports
+
+        win_rel_path = r"packages\server\src\routes\api.py"
+        mod_id = compute_module_id(win_rel_path)
+        assert mod_id == "packages.server.src.routes.api"
+
+        win_init_path = r"packages\server\src\__init__.py"
+        init_id = compute_module_id(win_init_path)
+        assert init_id == "packages.server.src"
+
+        code = "from .models import User\nfrom ..db import session\n"
+        imps = extract_python_imports(code, win_rel_path)
+        assert "packages.server.src.routes.models" in imps
+        assert "packages.server.src.db" in imps
+
 
 

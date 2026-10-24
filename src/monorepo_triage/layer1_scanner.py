@@ -141,7 +141,7 @@ class ScanSummary:
 
 def compute_module_id(rel_path: str) -> str:
     """Compute canonical module identifier from relative file path."""
-    slash_parts = rel_path.split("/")
+    slash_parts = rel_path.replace("\\", "/").split("/")
     last = slash_parts[-1]
     dot_idx = last.rfind(".")
     if dot_idx > 0:
@@ -194,7 +194,7 @@ def extract_python_imports(
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         return ()
 
-    parent_parts = rel_path.split("/")[:-1] if rel_path else []
+    parent_parts = rel_path.replace("\\", "/").split("/")[:-1] if rel_path else []
     stripped_parent_parts = list(parent_parts)
     while stripped_parent_parts and stripped_parent_parts[0] in SOURCE_ROOT_MARKERS:
         stripped_parent_parts.pop(0)
