@@ -148,7 +148,7 @@ OFFLINE_WAVE_REPLAY_PATCHES: dict[str, str] = {
         "def unwrap_or_warn(obj: LazyObject, fallback_label: str = 'empty_lazy_object') -> str:\n"
         "    if obj._wrapped is not None:\n"
         "        return obj._wrapped\n"
-        "    return f'UnwrappedFallback:{fallback_label}'\n"
+        "    return f'RemovedInNextVersionWarning:{fallback_label}'\n"
     ),
     "django/utils/deprecation.py": (
         "from __future__ import annotations\n\n"
@@ -216,15 +216,24 @@ def judge_verify_ast_annotations(source_text: str) -> tuple[bool, int, int]:
     return (total_funcs > 0 and total_funcs == fully_typed_funcs), fully_typed_funcs, total_funcs
 
 
-def judge_run_mypy_strict(root: Path, rel_paths: list[str]) -> tuple[bool, str]:
+def judge_run_mypy_strict(
+    root: Path,
+    rel_paths: list[str],
+    follow_imports: str = "normal",
+) -> tuple[bool, str]:
     """Isolated Judge Agent: Execute real `mypy --strict` against the specified files."""
     old_mypypath = os.environ.get("MYPYPATH")
     os.environ["MYPYPATH"] = str(root)
     try:
         targets = [str(root / p) for p in rel_paths]
-        stdout, stderr, exit_code = mypy_api.run(
-            ["--strict", "--explicit-package-bases", "--no-color-output", *targets]
-        )
+        args = [
+            "--strict",
+            "--explicit-package-bases",
+            "--no-color-output",
+            f"--follow-imports={follow_imports}",
+            *targets,
+        ]
+        stdout, stderr, exit_code = mypy_api.run(args)
         summary = (stdout + stderr).strip().splitlines()[-1] if (stdout or stderr) else ""
         return exit_code == 0, summary
     finally:
@@ -268,7 +277,9 @@ def run_enterprise_sprint_demo() -> dict[str, Any]:
         val_rel = "django/core/validators.py"
         original_val = (root / val_rel).read_text()
         (root / val_rel).write_text(OFFLINE_WAVE_REPLAY_PATCHES[val_rel])
-        out_of_order_passed, out_of_order_msg = judge_run_mypy_strict(root, [val_rel])
+        out_of_order_passed, out_of_order_msg = judge_run_mypy_strict(
+            root, [val_rel], follow_imports="silent"
+        )
         (root / val_rel).write_text(original_val)
 
         # Stage 3: Execute Bottom-Up Wave Replay (Wave 0 -> Wave 3) + Real mypy --strict Judge
@@ -331,12 +342,29 @@ def run_enterprise_sprint_demo() -> dict[str, Any]:
                 "category": "ARCHITECTURAL_SEAM_SIGN_OFF",
                 "target": "django/utils/functional.py <-> django/utils/deprecation.py (Wave 1 Cyclic Knot)",
                 "why_ai_deferred": (
-                    "Wave 1 patch decoupled functional.unwrap_or_warn from deprecation.warn_legacy_arg, "
-                    "reducing cyclic_knot_count from 1 -> 0. Senior engineer should confirm whether "
-                    "external callers rely on the legacy RemovedInNextVersionWarning string prefix."
+                    "Wave 1 patch decoupled functional.unwrap_or_warn from deprecation.warn_legacy_arg by inlining "
+                    "the RemovedInNextVersionWarning format string, reducing cyclic_knot_count from 1 -> 0 while "
+                    "preserving 100% identical runtime string output. Senior engineer should confirm whether "
+                    "to extract this warning string to a shared leaf constants module."
                 ),
             },
         ]
+
+        after_typed_funcs = sum(
+            int(item["typed_functions"].split("/")[0])
+            for entry in wave_execution_log
+            for item in entry["judge_file_checks"]
+        )
+        after_total_funcs = sum(
+            int(item["typed_functions"].split("/")[1])
+            for entry in wave_execution_log
+            for item in entry["judge_file_checks"]
+        )
+        after_pct = (
+            round((after_typed_funcs / after_total_funcs) * 100, 1)
+            if after_total_funcs > 0
+            else 0.0
+        )
 
         return {
             "sprint_title": "Sprint 42: Django Legacy Utils & Postgres Fields Strict Type Modernization",
@@ -364,7 +392,7 @@ def run_enterprise_sprint_demo() -> dict[str, Any]:
             },
             "stage3_autonomous_80_pct_execution": {
                 "before_typed_functions": f"{before_typed_funcs}/{before_total_funcs} (0%)",
-                "after_typed_functions": f"{before_total_funcs}/{before_total_funcs} (100%)",
+                "after_typed_functions": f"{after_typed_funcs}/{after_total_funcs} ({int(after_pct)}%)",
                 "cyclic_knots_after_stage3": plan_after.cyclic_knot_count,
                 "waves_preserved_after_stage3": plan_after.max_wave_depth + 1,
                 "waves_executed": wave_execution_log,

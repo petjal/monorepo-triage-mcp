@@ -91,8 +91,10 @@ def plan_dependency_graph(
         edges=dependency_edges,
         token_budget=valid_budget,
     )
+    neo4j_cypher = export_neo4j_cypher(plan)
     return {
         "modernization_plan": asdict(plan),
+        "neo4j_knowledge_graph_cypher": neo4j_cypher,
     }
 
 

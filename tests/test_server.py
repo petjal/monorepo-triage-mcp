@@ -48,6 +48,7 @@ class TestPlanDependencyGraphTool:
         )
 
         assert "modernization_plan" in res
+        assert "neo4j_knowledge_graph_cypher" in res
         plan = res["modernization_plan"]
         assert plan["total_active_tokens"] == 6500
         assert plan["max_wave_depth"] == 2
@@ -94,7 +95,7 @@ class TestTriageAndPlanRepositoryTool:
         assert "modernization_plan" in res
         assert "agent_action_plan_markdown" in res
         assert "neo4j_knowledge_graph_cypher" in res
-        assert "MERGE (n:CondensationNode" in res["neo4j_knowledge_graph_cypher"]
+        assert ":CondensationNode" in res["neo4j_knowledge_graph_cypher"]
         assert "Wave-Ordered Parallel Agent Swarm Schedule" in res["agent_action_plan_markdown"]
 
         scan = res["scan_summary"]

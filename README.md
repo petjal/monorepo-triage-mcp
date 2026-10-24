@@ -6,8 +6,8 @@ This is a portfolio demonstration illustrating field-deployed repository triage,
 
 > **Repository Document Map (Tool vs. External Case Studies vs. Internal QA):**
 > 1. **[`README.md`](https://github.com/petjal/monorepo-triage-mcp/blob/master/README.md) (This Document — The Tool):** Architecture, algorithms, and usage of the `monorepo-triage-mcp` server.
-> 2. **[`CASE_STUDIES.md`](https://github.com/petjal/monorepo-triage-mcp/blob/master/CASE_STUDIES.md) (Assessing External Codebases *With* the Tool):** Plain-English executive brief and technical pre-flight findings generated **by** `monorepo-triage-mcp` when scanning **`trpc/trpc`** (Green Light: 100% Swarm-Ready) and **`django/django`** (Yellow Light: 153-Module / 628K-Token Core Hairball at Wave 5) in preparation for a large-scale AI modernization project.
-> 3. **[`VERIFICATION_LOG.md`](https://github.com/petjal/monorepo-triage-mcp/blob/master/VERIFICATION_LOG.md) (Auditing *Our Own* Source Code):** Multi-round cold-context adversarial red-teaming, 19 defect remediations, 74-test regression suite, and Linux cgroup telemetry of `monorepo-triage-mcp`'s own Python codebase.
+> 2. **[`CASE_STUDIES.md`](https://github.com/petjal/monorepo-triage-mcp/blob/master/CASE_STUDIES.md) (Assessing External Codebases *With* the Tool):** Plain-English executive brief and technical pre-flight findings generated **by** `monorepo-triage-mcp` when scanning **`trpc/trpc`** (Green Light: 100% Swarm-Ready across 27 waves) and **`django/django`** (Green Light: 3 Database Backend Knots across 68 waves) in preparation for a large-scale AI modernization project.
+> 3. **[`VERIFICATION_LOG.md`](https://github.com/petjal/monorepo-triage-mcp/blob/master/VERIFICATION_LOG.md) (Auditing *Our Own* Source Code):** Multi-round cold-context adversarial red-teaming, 28 defect remediations, 85-test regression suite, and Linux cgroup telemetry of `monorepo-triage-mcp`'s own Python codebase.
 
 ## Background
 
@@ -29,7 +29,7 @@ This tool implements the pre-flight inspection and partitioning workflow develop
   * Maximum single source file size: `2 MB` (files exceeding `2 MB` or containing null bytes `\x00` in the first `8 KB` are pruned as binary/oversized blobs).
 * **Outputs (`triage_and_plan_repository`):**
   * **Pre-Flight Scan Summary:** Per-file disposition (`ACTIVE_SOURCE`, `PRUNED_BLOAT`, `QUARANTINED_DLP`), `pruned_file_count` (omitting `PRUNED_BLOAT` records from the MCP JSON array by default via `include_pruned_files=False` to protect the calling agent's context window), estimated token counts, token reduction ratio, skipped symlinks, and nested directory exclusion paths (e.g. `packages/web/node_modules`).
-  * **Modernization Plan:** Strongly Connected Components (SCCs), bottom-up wave numbers (`0..k`), and token-bounded agent work slices (`READY` vs `OVERSIZED_COUPLED_KNOT`).
+  * **Modernization Plan:** Strongly Connected Components (SCCs), bottom-up wave numbers (`0..k`), and token-bounded agent work slices (`READY` vs `OVERSIZED_COUPLED_KNOT` vs `OVERSIZED_SINGLE_MODULE`).
   * **Human-in-the-Loop Agent Action Plan (`agent_action_plan_markdown`):** Reviewable Markdown specification detailing context reduction metrics, DLP quarantine gates, and per-wave **Max Parallel Agent Workers** for concurrent swarm execution.
   * **Neo4j Knowledge Graph Cypher (`neo4j_knowledge_graph_cypher`):** Deterministic `MERGE` statements exporting `(:CondensationNode)` vertices and `[:DEPENDS_ON]` edges into a graph database.
 
@@ -46,40 +46,98 @@ This tool implements the pre-flight inspection and partitioning workflow develop
 ## Real-World Public Monorepo Benchmarks & Full-Stack Telemetry
 
 To verify efficiency on modest customer VMs, the full pipeline (`scan_repository` $\rightarrow$ `plan_from_scan` $\rightarrow$ `render_agent_action_plan_markdown` $\rightarrow$ `export_neo4j_cypher`) was benchmarked inside a kernel-enforced **1-vCPU, 128 MB RAM, 0-Swap Linux cgroup v2 scope** (`systemd-run --user --scope -p MemoryMax=128M -p MemorySwapMax=0 -p CPUQuota=100%`) against two complex public repositories:
-1. **`django/django`** (7,114 files, 86 MB on disk: 2,982 active modules / 5.64M active tokens, 4,132 pruned files / 11.13M pruned tokens, 16 circular dependency knots across 24 modernization waves, 4 documentation symlink loops skipped).
-2. **`trpc/trpc` + 4,000 `node_modules` files** (5,686 files, 56 MB on disk: 852 active TypeScript modules / 775K active tokens, 4,834 pruned files / 13.69M pruned tokens, 3 circular dependency knots across 18 modernization waves).
+1. **`django/django`** (7,085 files, 86 MB on disk: 2,982 active modules / 5.64M active tokens, 4,103 pruned files / 7.28M pruned tokens, 3 circular dependency knots across 68 modernization waves, 4 documentation symlink loops skipped; internal `.git/` packfiles and tool caches excluded from metric inflation).
+2. **`trpc/trpc`** (1,656 files, 32 MB on disk: 852 active TypeScript modules / 775K active tokens, 804 pruned files / 1.37M pruned tokens, 3 circular dependency knots across 27 modernization waves; with +4,000 synthetic test files: 5,657 files, 4,805 pruned files / 1.40M pruned tokens).
 
 | Target / Metric | Before Systems Optimization (`c97de85`) | After Systems Optimization (1-vCPU / 128 MB cgroup) | Improvement |
 | :--- | :--- | :--- | :--- |
 | **`trpc/trpc` (+4k `node_modules`) Total Time** | `2,149.14 ms` | **`282.62 ms`** | **7.6x faster** |
 | **`trpc/trpc` Kernel Read Syscalls (`/proc/self/io syscr`)** | `11,373` syscalls (`48.30 MB` VFS read) | **`3,300` syscalls (`7.16 MB` VFS read)** | **71.0% fewer syscalls / 85.2% less I/O** |
 | **`trpc/trpc` Peak Resident Memory (`VmHWM`)** | `30.43 MB` | **`22.14 MB`** (`0` network egress) | **27.2% lower peak RAM** |
-| **`django/django` (7,114 files) Total Time** | `5,705.29 ms` | **`2,517.95 ms`** (`2,742.70 ms` in 128 MB cgroup) | **2.3x faster** (`9.3x` non-AST speedup) |
+| **`django/django` (7,085 files) Total Time** | `5,705.29 ms` | **`2,517.95 ms`** (`2,742.70 ms` in 128 MB cgroup) | **2.3x faster** (`9.3x` non-AST speedup) |
 | **`django/django` Peak Resident Memory (`VmHWM`)** | `58.93 MB` | **`56.37 MB`** (`0` network egress) | Fits comfortably in 128 MB RAM |
 | **TS `export` + 600 Indented Comments (25 KB)** | `7,140.39 ms` ($O(L^3)$ regex backtracking) | **`0.58 ms`** (linear single-pass regex) | **12,311x faster** |
 | **20,000-Module FFD Slice Packing** | `5,181.13 ms` ($O(K^2 \log K)$ tuple re-sort) | **`97.44 ms`** (mutable bin + capacity pruning) | **53.2x faster** |
 
 ## Self-Hosting Example
 
-Running `triage_and_plan_repository` on this repository itself (`token_budget=6000`):
+Running `triage_and_plan_repository` on this repository itself (`token_budget=16000`):
 
 ```json
 {
-  "active_files_returned": 10,
-  "pruned_file_count": 254,
-  "quarantined_tokens": 0,
-  "max_wave_depth": 4,
-  "waves": {
-    "src.monorepo_triage": 0,
-    "src.monorepo_triage.layer0_invariants": 0,
-    "src.monorepo_triage.layer1_scanner": 1,
-    "tests.test_layer0_invariants": 1,
-    "tests.test_layer1_scanner": 2,
-    "src.monorepo_triage.layer2_slice_planner": 2,
-    "tests.test_layer2_slice_planner": 3,
-    "examples.run_django_sprint_demo": 3,
-    "src.monorepo_triage.server": 3,
-    "tests.test_server": 4
+  "scan_summary": {
+    "active_tokens": 36030,
+    "pruned_tokens": 15102,
+    "quarantined_tokens": 7890,
+    "token_reduction_ratio": 0.3895,
+    "pruned_file_count": 7,
+    "symlink_loops_skipped": [],
+    "recommended_exclusions": []
+  },
+  "modernization_plan": {
+    "cyclic_knot_count": 0,
+    "max_wave_depth": 4,
+    "total_active_tokens": 36030,
+    "token_budget": 16000,
+    "slices": [
+      {
+        "slice_id": "slice_w0_000",
+        "wave": 0,
+        "total_tokens": 1300,
+        "status": "READY",
+        "scc_ids": [
+          "src.monorepo_triage.layer0_invariants",
+          "src.monorepo_triage"
+        ]
+      },
+      {
+        "slice_id": "slice_w1_000",
+        "wave": 1,
+        "total_tokens": 8488,
+        "status": "READY",
+        "scc_ids": [
+          "src.monorepo_triage.layer1_scanner",
+          "tests.test_layer0_invariants"
+        ]
+      },
+      {
+        "slice_id": "slice_w2_000",
+        "wave": 2,
+        "total_tokens": 7082,
+        "status": "READY",
+        "scc_ids": [
+          "src.monorepo_triage.layer2_slice_planner"
+        ]
+      },
+      {
+        "slice_id": "slice_w3_000",
+        "wave": 3,
+        "total_tokens": 10609,
+        "status": "READY",
+        "scc_ids": [
+          "tests.test_layer2_slice_planner"
+        ]
+      },
+      {
+        "slice_id": "slice_w3_001",
+        "wave": 3,
+        "total_tokens": 6673,
+        "status": "READY",
+        "scc_ids": [
+          "examples.run_django_sprint_demo",
+          "src.monorepo_triage.server"
+        ]
+      },
+      {
+        "slice_id": "slice_w4_000",
+        "wave": 4,
+        "total_tokens": 1878,
+        "status": "READY",
+        "scc_ids": [
+          "tests.test_server"
+        ]
+      }
+    ]
   }
 }
 ```
@@ -96,12 +154,12 @@ In an enterprise pre-flight assessment over a customer VPN or VDI, executing arb
 
 ## How It Was Built (Prototype -> Cold Adversarial Breaker -> Regression Suite)
 
-Asking a single LLM session to practice strict "Test-First TDD" is mostly theater: when the same model writes both the tests and the implementation in one pass, it writes happy-path tests that mirror its own blindspots.
+Asking a single LLM session to practice strict "Test-First TDD" is mostly theater: when the same model writes both the tests and the implementation in one pass, it writes happy-path tests that mirror its own blindspots. Indeed, `git log` shows that the initial builder subagent committed Stage 1 as 8 alternating `test(layerX)` $\rightarrow$ `feat(layerX)` commits across 8 minutes (`fd91474`..`3946e55`). All 48 tests passed 100% on the first run, yet hid 20+ severe architectural and systems defects.
 
-Instead, this repository was built in three distinct stages:
+Instead, this repository was hardened in three distinct stages:
 1. **Working Nascent Prototype:** I specified the 4-layer architecture and domain invariants from my Black Duck field experience, and directed a fast code-generation model to build a working prototype with 48 baseline unit tests.
-2. **Cold-Context Adversarial Red-Teaming & Live Repo Profiling:** Once the nascent tool was running, I spawned isolated, zero-context reviewer models tasked strictly with breaking the working code via live Python probes and profiled full-stack system telemetry (`/proc/self/io`, `/proc/self/status`, `cProfile`) against `django/django` and `trpc/trpc`. Across three adversarial rounds, that process uncovered **19 real defects and systems bottlenecks** that passed the original 48 happy-path tests (including full disk reads on pruned `node_modules` files, $O(L^3)$ TypeScript regex backtracking, $O(K^2 \log K)$ FFD tuple re-sorting, cross-service microservice alias collisions, false Python `__init__.py` cycles on PEP 8 imports, Go package directory resolution failures, TypeScript `index.ts` barrel blindspots, backtick comment corruption, symlink shadowing, and `scc_id` delimiter collisions).
-3. **Regression Test Hardening:** Each concrete failure mode was turned into a failing regression test first and then fixed, expanding the suite to **75 passing unit tests**.
+2. **Cold-Context Adversarial Red-Teaming & Live Repo Profiling:** Once the nascent tool was running, I spawned isolated, zero-context reviewer models tasked strictly with breaking the working code via live Python probes and profiled full-stack system telemetry (`/proc/self/io`, `/proc/self/status`, `cProfile`) against `django/django` and `trpc/trpc`. Across five adversarial rounds, that process uncovered **28 real defects and systems bottlenecks** that passed the original 48 happy-path tests (including full disk reads on pruned `node_modules` files, $O(L^3)$ TypeScript regex backtracking, $O(K^2 \log K)$ FFD tuple re-sorting, cross-service microservice alias collisions, false Python `__init__.py` cycles on PEP 8 imports, AST module-load traversal false knots vs function-local lazy loading, Go package directory and stdlib resolution, TypeScript `.index` barrels and `@scope/pkg` aliases, backtick comment corruption, symlink shadowing, and `scc_id` delimiter collisions).
+3. **Regression Test Hardening:** Each concrete failure mode was turned into a failing regression test first and then fixed, expanding the suite to **85 passing unit tests**.
 
 For the complete defect log, benchmark telemetry, and architectural breakdown, see [VERIFICATION_LOG.md](https://github.com/petjal/monorepo-triage-mcp/blob/master/VERIFICATION_LOG.md).
 

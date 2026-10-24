@@ -1,6 +1,7 @@
 """Layer 2: Tarjan SCC Condensation, Bottom-Up Wave Assignment, and Token-Bounded Slice Planner."""
 
 import json
+import posixpath
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
@@ -9,9 +10,13 @@ from monorepo_triage.layer0_invariants import (
     validate_module_tokens,
     validate_token_budget,
 )
-from monorepo_triage.layer1_scanner import ScanSummary
+from monorepo_triage.layer1_scanner import (
+    _GO_STDLIB_TOP_DIRS,
+    ScanSummary,
+    _is_go_stdlib,
+)
 
-SliceStatus = Literal["READY", "OVERSIZED_COUPLED_KNOT"]
+SliceStatus = Literal["READY", "OVERSIZED_COUPLED_KNOT", "OVERSIZED_SINGLE_MODULE"]
 
 
 @dataclass(frozen=True)
@@ -41,6 +46,7 @@ class ModernizationPlan:
     cyclic_knot_count: int
     max_wave_depth: int
     total_active_tokens: int
+    token_budget: int = 16000
 
 
 @dataclass(frozen=True)
@@ -255,6 +261,11 @@ def build_modernization_plan(
         for node in sorted_nodes:
             if node.total_tokens > valid_budget:
                 slice_id = f"wave_{w}_slice_{len(wave_bins):02d}"
+                status: SliceStatus = (
+                    "OVERSIZED_COUPLED_KNOT"
+                    if (node.is_cyclic or len(node.modules) > 1)
+                    else "OVERSIZED_SINGLE_MODULE"
+                )
                 wave_bins.append(
                     _MutableSliceBin(
                         slice_id=slice_id,
@@ -262,7 +273,7 @@ def build_modernization_plan(
                         scc_ids=[node.scc_id],
                         modules=list(node.modules),
                         total_tokens=node.total_tokens,
-                        status="OVERSIZED_COUPLED_KNOT",
+                        status=status,
                     )
                 )
             else:
@@ -311,6 +322,7 @@ def build_modernization_plan(
         cyclic_knot_count=cyclic_knot_count,
         max_wave_depth=max_wave,
         total_active_tokens=total_active_tokens,
+        token_budget=valid_budget,
     )
 
 
@@ -320,6 +332,11 @@ SOURCE_ROOT_MARKERS: tuple[str, ...] = (
     "src.main.kotlin.",
     "src.",
     "lib.",
+)
+
+
+_CONTAINER_ROOT_DIRS: frozenset[str] = frozenset(
+    {"services", "packages", "apps", "libs", "modules"}
 )
 
 
@@ -333,18 +350,45 @@ def _shared_prefix_segments(mod_a: str, mod_b: str) -> int:
             shared += 1
         else:
             break
+    if shared == 1 and parts_a and parts_a[0] in _CONTAINER_ROOT_DIRS:
+        return 0
     return shared
 
 
-def _filter_by_locality(self_mod_id: str, candidates: set[str]) -> set[str]:
-    """Resolve ambiguous multi-service aliases to the candidate(s) sharing the closest package root."""
-    if len(candidates) <= 1:
-        return candidates
-    scored = [(cand, _shared_prefix_segments(self_mod_id, cand)) for cand in candidates]
+def _is_unintended_cross_service_alias(self_mod_id: str, cand: str, imp: str) -> bool:
+    parts_a = self_mod_id.split(".")
+    parts_b = cand.split(".")
+    if (
+        len(parts_a) >= 2
+        and len(parts_b) >= 2
+        and parts_a[0] == parts_b[0]
+        and parts_a[0] in _CONTAINER_ROOT_DIRS
+        and parts_a[1] != parts_b[1]
+    ):
+        imp_parts = set(imp.replace("/", ".").split("."))
+        if parts_b[1] not in imp_parts:
+            return True
+    return False
+
+
+def _filter_by_locality(
+    self_mod_id: str,
+    candidates: set[str],
+    imp: str = "",
+) -> set[str]:
+    """Resolve ambiguous multi-service aliases to candidate(s) sharing closest package root, rejecting unintended cross-service collisions."""
+    valid_cands = {
+        cand
+        for cand in candidates
+        if not _is_unintended_cross_service_alias(self_mod_id, cand, imp)
+    }
+    if len(valid_cands) <= 1:
+        return valid_cands
+    scored = [(cand, _shared_prefix_segments(self_mod_id, cand)) for cand in valid_cands]
     max_shared = max(score for _, score in scored)
     if max_shared > 0:
         return {cand for cand, score in scored if score == max_shared}
-    return candidates
+    return valid_cands
 
 
 def _resolve_import_targets(
@@ -353,11 +397,27 @@ def _resolve_import_targets(
     active_module_set: set[str],
     alias_to_targets: dict[str, set[str]],
     go_dir_to_modules: dict[str, set[str]],
+    package_barrel_modules: set[str] | None = None,
+    java_pkg_to_modules: dict[str, set[str]] | None = None,
 ) -> set[str]:
     """Resolve an import string to one or more known internal module_ids across polyglot layouts."""
     resolved: set[str] = set()
+    barrels = package_barrel_modules or set()
+    java_pkgs = java_pkg_to_modules or {}
 
-    # 1. Go package path suffix matching (e.g. 'github.com/acme/repo/pkg/db' -> 'pkg/db')
+    # 0. Reject Go standard library imports early
+    if _is_go_stdlib(imp):
+        return resolved
+
+    # 1. Java wildcard package match (e.g. 'import com.acme.models.*')
+    if imp in java_pkgs:
+        for target_mod in java_pkgs[imp]:
+            if target_mod != self_mod_id:
+                resolved.add(target_mod)
+        if resolved:
+            return resolved
+
+    # 2. Go package path suffix matching (e.g. 'github.com/acme/repo/pkg/db' -> 'pkg/db')
     if "/" in imp and not imp.startswith("."):
         slash_parts = imp.split("/")
         for i in range(len(slash_parts)):
@@ -371,23 +431,23 @@ def _resolve_import_targets(
                 if resolved:
                     return resolved
 
-    # 2. Direct module or alias match (including barrel index.ts and nested src/ layouts)
+    # 3. Direct module or alias match (including barrel index.ts and nested src/ layouts)
     if imp in active_module_set:
-        if imp != self_mod_id and not self_mod_id.startswith(imp + "."):
+        if imp != self_mod_id and not (imp in barrels and self_mod_id.startswith(imp + ".")):
             resolved.add(imp)
         return resolved
     if imp in alias_to_targets:
         cands = {
             t
             for t in alias_to_targets[imp]
-            if t != self_mod_id and not self_mod_id.startswith(t + ".")
+            if t != self_mod_id and not (t in barrels and self_mod_id.startswith(t + "."))
         }
-        return _filter_by_locality(self_mod_id, cands)
+        return _filter_by_locality(self_mod_id, cands, imp)
 
-    # 3. Single-level symbol stripping (e.g. 'pkg.service.UserService' -> 'pkg.service')
+    # 4. Single-level symbol stripping (e.g. 'pkg.service.UserService' -> 'pkg.service')
     if "." in imp:
         parent_cand = imp.rsplit(".", 1)[0]
-        if self_mod_id.startswith(parent_cand + "."):
+        if parent_cand in barrels and self_mod_id.startswith(parent_cand + "."):
             return resolved
         if parent_cand in active_module_set and parent_cand != self_mod_id:
             resolved.add(parent_cand)
@@ -396,9 +456,9 @@ def _resolve_import_targets(
             cands = {
                 t
                 for t in alias_to_targets[parent_cand]
-                if t != self_mod_id and not self_mod_id.startswith(t + ".")
+                if t != self_mod_id and not (t in barrels and self_mod_id.startswith(t + "."))
             }
-            return _filter_by_locality(self_mod_id, cands)
+            return _filter_by_locality(self_mod_id, cands, imp)
 
     return resolved
 
@@ -431,6 +491,20 @@ def plan_from_scan(
         modules[f.module_id] = modules.get(f.module_id, 0) + f.estimated_tokens
     active_module_set = set(modules.keys())
 
+    BARREL_NAMES = frozenset(
+        {"__init__.py", "index.ts", "index.tsx", "index.js", "index.jsx"}
+    )
+    package_barrel_modules: set[str] = set()
+    for f in active_files:
+        assert f.module_id is not None
+        fname = posixpath.basename(f.rel_path)
+        if fname in BARREL_NAMES or f.rel_path.endswith(
+            ("/__init__.py", "/index.ts", "/index.tsx", "/index.js", "/index.jsx")
+        ):
+            package_barrel_modules.add(f.module_id)
+            if f.module_id.endswith(".index"):
+                package_barrel_modules.add(f.module_id[: -len(".index")])
+
     alias_to_targets: dict[str, set[str]] = {}
     for mod_id in sorted(active_module_set):
         # TypeScript / JS barrel index resolution (src.auth.index -> src.auth)
@@ -438,7 +512,7 @@ def plan_from_scan(
             barrel_prefix = mod_id[: -len(".index")]
             _register_alias(barrel_prefix, mod_id, active_module_set, alias_to_targets)
 
-        # Root and nested monorepo source-root prefixes (src., packages.core.src., billing.src.main.java.)
+        # Root and nested monorepo source-root prefixes
         for marker in SOURCE_ROOT_MARKERS:
             if mod_id.startswith(marker):
                 stripped = mod_id[len(marker) :]
@@ -448,12 +522,39 @@ def plan_from_scan(
                 idx = mod_id.find(nested_marker)
                 stripped = mod_id[idx + len(nested_marker) :]
                 _register_alias(stripped, mod_id, active_module_set, alias_to_targets)
+                prefix_before = mod_id[:idx]
+                pkg = prefix_before.rsplit(".", 1)[-1]
+                if pkg and stripped:
+                    _register_alias(f"{pkg}.{stripped}", mod_id, active_module_set, alias_to_targets)
+                    if stripped == "index":
+                        _register_alias(pkg, mod_id, active_module_set, alias_to_targets)
 
     go_dir_to_modules: dict[str, set[str]] = {}
     for f in active_files:
         if f.rel_path.endswith(".go") and f.module_id:
             rel_dir = f.rel_path.rsplit("/", 1)[0] if "/" in f.rel_path else "."
             go_dir_to_modules.setdefault(rel_dir, set()).add(f.module_id)
+            if "/" in rel_dir:
+                dir_segs = rel_dir.split("/")
+                for i in range(1, len(dir_segs)):
+                    sub_seg = "/".join(dir_segs[i:])
+                    if (len(dir_segs) - i >= 2) or (sub_seg not in _GO_STDLIB_TOP_DIRS):
+                        go_dir_to_modules.setdefault(sub_seg, set()).add(f.module_id)
+
+    java_pkg_to_modules: dict[str, set[str]] = {}
+    for f in active_files:
+        if f.rel_path.endswith(".java") and f.module_id and "." in f.module_id:
+            java_pkg = f.module_id.rsplit(".", 1)[0]
+            java_pkg_to_modules.setdefault(java_pkg, set()).add(f.module_id)
+            for marker in SOURCE_ROOT_MARKERS:
+                nested_marker = "." + marker
+                if nested_marker in java_pkg:
+                    idx = java_pkg.find(nested_marker)
+                    stripped_pkg = java_pkg[idx + len(nested_marker) :]
+                    java_pkg_to_modules.setdefault(stripped_pkg, set()).add(f.module_id)
+                elif java_pkg.startswith(marker):
+                    stripped_pkg = java_pkg[len(marker) :]
+                    java_pkg_to_modules.setdefault(stripped_pkg, set()).add(f.module_id)
 
     edges: dict[str, set[str]] = {mod_id: set() for mod_id in active_module_set}
     for f in active_files:
@@ -466,6 +567,8 @@ def plan_from_scan(
                 active_module_set,
                 alias_to_targets,
                 go_dir_to_modules,
+                package_barrel_modules=package_barrel_modules,
+                java_pkg_to_modules=java_pkg_to_modules,
             )
             deps.update(targets)
 
@@ -475,14 +578,15 @@ def plan_from_scan(
 def export_neo4j_cypher(plan: ModernizationPlan) -> str:
     """Export the condensation DAG and wave schedule as deterministic Neo4j Cypher statements."""
     lines: list[str] = []
-    for node in plan.condensation_nodes:
+    for idx, node in enumerate(plan.condensation_nodes):
+        var = f"s{idx}"
         scc_lit = json.dumps(node.scc_id)
         mods_lit = json.dumps(list(node.modules))
         cyc_lit = "true" if node.is_cyclic else "false"
         lines.append(
-            f"MERGE (n:CondensationNode {{scc_id: {scc_lit}}}) "
-            f"SET n.wave = {node.wave}, n.is_cyclic = {cyc_lit}, "
-            f"n.total_tokens = {node.total_tokens}, n.modules = {mods_lit};"
+            f"MERGE ({var}:CondensationNode {{scc_id: {scc_lit}}}) "
+            f"SET {var}.wave = {node.wave}, {var}.is_cyclic = {cyc_lit}, "
+            f"{var}.total_tokens = {node.total_tokens}, {var}.modules = {mods_lit};"
         )
     for node in plan.condensation_nodes:
         src_lit = json.dumps(node.scc_id)
@@ -499,10 +603,11 @@ def export_neo4j_cypher(plan: ModernizationPlan) -> str:
 def render_agent_action_plan_markdown(
     scan_summary: ScanSummary,
     plan: ModernizationPlan,
-    token_budget: int = 16000,
+    token_budget: int | None = None,
 ) -> str:
     """Render a human-in-the-loop Technical Specification and Agent Action Plan gate in Markdown."""
-    valid_budget = validate_token_budget(token_budget)
+    budget = plan.token_budget if token_budget is None else token_budget
+    valid_budget = validate_token_budget(budget)
     pruned_count = sum(1 for f in scan_summary.files if f.disposition == "PRUNED_BLOAT")
     quarantined_files = [
         f.rel_path for f in scan_summary.files if f.disposition == "QUARANTINED_DLP"

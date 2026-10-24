@@ -135,17 +135,26 @@ class TestDeterministicSliceBinPacking:
         modules = {
             "monolith.heavy": 25000,
             "light.helper": 1000,
+            "knot.a": 10000,
+            "knot.b": 10000,
         }
         edges: dict[str, set[str]] = {
             "monolith.heavy": set(),
             "light.helper": set(),
+            "knot.a": {"knot.b"},
+            "knot.b": {"knot.a"},
         }
 
         plan = build_modernization_plan(modules, edges, token_budget=16000)
-        oversized = [s for s in plan.slices if s.status == "OVERSIZED_COUPLED_KNOT"]
-        assert len(oversized) == 1
-        assert oversized[0].modules == ("monolith.heavy",)
-        assert oversized[0].total_tokens == 25000
+        oversized_singles = [s for s in plan.slices if s.status == "OVERSIZED_SINGLE_MODULE"]
+        assert len(oversized_singles) == 1
+        assert oversized_singles[0].modules == ("monolith.heavy",)
+        assert oversized_singles[0].total_tokens == 25000
+
+        oversized_knots = [s for s in plan.slices if s.status == "OVERSIZED_COUPLED_KNOT"]
+        assert len(oversized_knots) == 1
+        assert set(oversized_knots[0].modules) == {"knot.a", "knot.b"}
+        assert oversized_knots[0].total_tokens == 20000
 
         ready = [s for s in plan.slices if s.status == "READY"]
         assert len(ready) == 1
@@ -560,7 +569,7 @@ class TestAuditRound2Layer2:
         )
         plan = plan_from_scan(scan, token_budget=16000)
         cypher = export_neo4j_cypher(plan)
-        assert 'MERGE (n:CondensationNode {scc_id: "src.db"})' in cypher
+        assert ':CondensationNode {scc_id: "src.db"}' in cypher
         assert 'MERGE (a)-[:DEPENDS_ON]->(b);' in cypher
 
         md = render_agent_action_plan_markdown(scan, plan, token_budget=16000)
@@ -684,6 +693,220 @@ class TestAuditRound3Layer2:
         empty_plan = plan_from_scan(empty_scan, token_budget=16000)
         md = render_agent_action_plan_markdown(empty_scan, empty_plan, token_budget=16000)
         assert "- **Bottom-Up Modernization Waves:** 0\n" in md
+
+
+class TestAuditRound4Layer2:
+    def test_regular_files_preserve_edges_router_test_and_directory_sibling(self) -> None:
+        """Finding 4: Multi-dot filenames (*.test.ts) and directory-siblings (../auth) must not have edges deleted."""
+        files = (
+            FileRecord(
+                rel_path="src/router.ts",
+                module_id="src.router",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=500,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=(),
+            ),
+            FileRecord(
+                rel_path="src/router.test.ts",
+                module_id="src.router.test",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=300,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=("./router", "src.router"),
+            ),
+            FileRecord(
+                rel_path="src/auth.ts",
+                module_id="src.auth",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=400,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=(),
+            ),
+            FileRecord(
+                rel_path="src/auth/helper.ts",
+                module_id="src.auth.helper",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=200,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=("../auth", "src.auth"),
+            ),
+        )
+        scan = ScanSummary("/tmp/r", files, 1400, 0, 0, 0.0, (), ())
+        plan = plan_from_scan(scan, token_budget=16000)
+        node_map = {n.scc_id: n for n in plan.condensation_nodes}
+
+        # Router test must be Wave 1 depending on router Wave 0
+        assert node_map["src.router"].wave == 0
+        assert node_map["src.router.test"].wave == 1
+        assert "src.router" in node_map["src.router.test"].depends_on_sccs
+
+        # Auth helper must be Wave 1 depending on auth Wave 0
+        assert node_map["src.auth"].wave == 0
+        assert node_map["src.auth.helper"].wave == 1
+        assert "src.auth" in node_map["src.auth.helper"].depends_on_sccs
+
+    def test_typescript_workspace_scoped_imports(self) -> None:
+        """Finding 4: Scoped workspace package imports (@trpc/server) resolve to packages/server/src/index.ts."""
+        files = (
+            FileRecord(
+                rel_path="packages/server/src/index.ts",
+                module_id="packages.server.src.index",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=1000,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=(),
+            ),
+            FileRecord(
+                rel_path="packages/client/src/index.ts",
+                module_id="packages.client.src.index",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=800,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=("@trpc/server", "server"),
+            ),
+        )
+        scan = ScanSummary("/tmp/trpc", files, 1800, 0, 0, 0.0, (), ())
+        plan = plan_from_scan(scan, token_budget=16000)
+        node_map = {n.scc_id: n for n in plan.condensation_nodes}
+
+        assert node_map["packages.server.src.index"].wave == 0
+        assert node_map["packages.client.src.index"].wave == 1
+        assert "packages.server.src.index" in node_map["packages.client.src.index"].depends_on_sccs
+
+    def test_go_stdlib_ignored_and_nested_monorepo_suffixes(self) -> None:
+        """Finding 4: Go stdlib 'net/http' is ignored, while nested monorepo 'github.com/acme/auth/pkg/db' resolves."""
+        files = (
+            FileRecord(
+                rel_path="http/handler.go",
+                module_id="http.handler",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=400,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=(),
+            ),
+            FileRecord(
+                rel_path="services/auth/pkg/db/client.go",
+                module_id="services.auth.pkg.db.client",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=500,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=("net/http",),
+            ),
+            FileRecord(
+                rel_path="services/auth/cmd/main.go",
+                module_id="services.auth.cmd.main",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=300,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=("github.com/acme/auth/pkg/db",),
+            ),
+        )
+        scan = ScanSummary("/tmp/go", files, 1200, 0, 0, 0.0, (), ())
+        plan = plan_from_scan(scan, token_budget=16000)
+        node_map = {n.scc_id: n for n in plan.condensation_nodes}
+
+        # db client importing 'net/http' must NOT depend on local 'http.handler'
+        assert "http.handler" not in node_map["services.auth.pkg.db.client"].depends_on_sccs
+        assert node_map["services.auth.pkg.db.client"].wave == 0
+
+        # main importing 'github.com/acme/auth/pkg/db' must resolve to services.auth.pkg.db.client
+        assert "services.auth.pkg.db.client" in node_map["services.auth.cmd.main"].depends_on_sccs
+        assert node_map["services.auth.cmd.main"].wave == 1
+
+    def test_java_wildcard_layer2_resolution(self) -> None:
+        """Finding 4: Java wildcard 'import com.acme.models.*' links to internal class files in Layer 2."""
+        files = (
+            FileRecord(
+                rel_path="billing/src/main/java/com/acme/models/User.java",
+                module_id="billing.src.main.java.com.acme.models.User",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=400,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=(),
+            ),
+            FileRecord(
+                rel_path="billing/src/main/java/com/acme/models/Order.java",
+                module_id="billing.src.main.java.com.acme.models.Order",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=400,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=(),
+            ),
+            FileRecord(
+                rel_path="billing/src/main/java/com/acme/service/UserService.java",
+                module_id="billing.src.main.java.com.acme.service.UserService",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=600,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=("com.acme.models",),
+            ),
+        )
+        scan = ScanSummary("/tmp/java", files, 1400, 0, 0, 0.0, (), ())
+        plan = plan_from_scan(scan, token_budget=16000)
+        node_map = {n.scc_id: n for n in plan.condensation_nodes}
+
+        user_svc = node_map["billing.src.main.java.com.acme.service.UserService"]
+        assert "billing.src.main.java.com.acme.models.User" in user_svc.depends_on_sccs
+        assert "billing.src.main.java.com.acme.models.Order" in user_svc.depends_on_sccs
+        assert user_svc.wave == 1
+
+    def test_filter_by_locality_container_roots_prevents_cross_service_knot(self) -> None:
+        """Finding 4: Microservices under services/ must not match un-scoped aliases in sibling services."""
+        files = (
+            FileRecord(
+                rel_path="services/billing/src/db.py",
+                module_id="services.billing.src.db",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=500,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=(),
+            ),
+            FileRecord(
+                rel_path="services/auth/src/worker.py",
+                module_id="services.auth.src.worker",
+                disposition="ACTIVE_SOURCE",
+                reason="supported_source_language",
+                estimated_tokens=500,
+                shannon_entropy=4.0,
+                max_line_length=60,
+                imports=("db",),
+            ),
+        )
+        scan = ScanSummary("/tmp/services", files, 1000, 0, 0, 0.0, (), ())
+        plan = plan_from_scan(scan, token_budget=16000)
+        node_map = {n.scc_id: n for n in plan.condensation_nodes}
+
+        # auth worker importing generic 'db' must NOT link to billing db
+        assert "services.billing.src.db" not in node_map["services.auth.src.worker"].depends_on_sccs
+        assert node_map["services.auth.src.worker"].wave == 0
+        assert node_map["services.billing.src.db"].wave == 0
 
 
 

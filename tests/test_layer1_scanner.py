@@ -305,13 +305,19 @@ class TestAuditRound2Layer1:
         pycache.mkdir(parents=True)
         (pycache / "mod.cpython-312.pyc").write_bytes(b"\x00\x01\x02\x03")
 
+        dist = repo / "src" / "dist"
+        dist.mkdir(parents=True)
+        (dist / "bundle.js").write_text("export const x = 1;\n")
+
         summary = scan_repository(repo)
         assert summary.quarantined_tokens == 0
         by_path = {f.rel_path: f for f in summary.files}
         assert by_path["node_modules/tls-pkg/dummy.pem"].disposition == "PRUNED_BLOAT"
         assert by_path["node_modules/tls-pkg/dummy.pem"].reason == "vendored_or_build_dir"
         assert "node_modules" in summary.recommended_exclusions
-        assert "src/__pycache__" in summary.recommended_exclusions
+        assert "src/dist" in summary.recommended_exclusions
+        assert "src/__pycache__" not in summary.recommended_exclusions
+        assert "src/__pycache__/mod.cpython-312.pyc" not in by_path
 
     def test_intra_repo_file_symlinks_and_broken_symlinks_skipped(self, tmp_path: Path) -> None:
         """Bug 7: File symlinks inside the repo and broken symlinks must be skipped, never double-counted."""
@@ -503,6 +509,136 @@ class TestAuditRound3Layer1:
 
         deep_expr = "x = " + ("1 + \\\n" * 4000) + "1\n"
         assert extract_python_imports(deep_expr, "pkg/deep.py") == ()
+
+
+class TestAuditRound4Layer1:
+    def test_ignored_vcs_and_cache_dirs_not_polluting_metrics(self, tmp_path: Path) -> None:
+        """Finding 1: .git/ packfiles and tool caches (__pycache__, .mypy_cache) are skipped entirely."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        src = repo / "src"
+        src.mkdir()
+        (src / "app.py").write_text("print('hello')\n")
+
+        # Fake VCS .git/ and packfile
+        git_pack = repo / ".git" / "objects" / "pack"
+        git_pack.mkdir(parents=True)
+        (git_pack / "pack-12345.pack").write_bytes(b"\x00" * (500 * 1024))
+
+        # Fake tool caches
+        mypy_c = repo / ".mypy_cache" / "3.12"
+        mypy_c.mkdir(parents=True)
+        (mypy_c / "cache.json").write_text('{"cache": 1}\n' * 500)
+
+        pycache = src / "__pycache__"
+        pycache.mkdir(parents=True)
+        (pycache / "app.cpython-312.pyc").write_bytes(b"\x00\x01\x02\x03")
+
+        summary = scan_repository(repo)
+        assert summary.pruned_tokens == 0
+        assert summary.token_reduction_ratio == 0.0
+        assert sum(1 for f in summary.files if f.disposition == "PRUNED_BLOAT") == 0
+        assert ".git" not in summary.recommended_exclusions
+        assert ".mypy_cache" not in summary.recommended_exclusions
+
+    def test_dlp_expanded_patterns(self, tmp_path: Path) -> None:
+        """Finding 2: ASIA temporary AWS keys, GitHub fine-grained PATs, and block private keys are quarantined."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+
+        # Temporary AWS ASIA key
+        (repo / "creds_asia.py").write_text("AWS_TEMP = 'ASIA1234567890ABCDEF'\n")
+        # Fine-grained GitHub PAT
+        (repo / "creds_pat.py").write_text("PAT = 'github_pat_11ABCD_12345678901234567890'\n")
+        # Old/alternate PEM block format
+        (repo / "cert.key").write_text("-----BEGIN RSA PRIVATE KEY BLOCK-----\nMIIE...\n-----END RSA PRIVATE KEY BLOCK-----\n")
+
+        summary = scan_repository(repo)
+        quarantined = {f.rel_path for f in summary.files if f.disposition == "QUARANTINED_DLP"}
+        assert "creds_asia.py" in quarantined
+        assert "creds_pat.py" in quarantined
+        assert "cert.key" in quarantined
+
+    def test_python_function_local_and_type_checking_imports_excluded(self) -> None:
+        """Finding 3: def/async def bodies and if TYPE_CHECKING: blocks do not form module-load circular dependencies."""
+        from monorepo_triage.layer1_scanner import extract_python_imports
+
+        code = (
+            "import os\n"
+            "from sys import argv\n\n"
+            "if TYPE_CHECKING:\n"
+            "    import deferred_mypy\n"
+            "    from typing import Protocol\n\n"
+            "def worker():\n"
+            "    import local_worker\n"
+            "    return local_worker.run()\n\n"
+            "async def async_worker():\n"
+            "    import local_async\n"
+            "    return local_async.run()\n\n"
+            "class MyService:\n"
+            "    import class_load_dep\n"
+            "    def method(self):\n"
+            "        import method_local_dep\n"
+            "        return method_local_dep.do()\n"
+        )
+        active_imps = extract_python_imports(code, "pkg/service.py", include_deferred=False)
+        assert "os" in active_imps
+        assert "sys.argv" in active_imps
+        assert "class_load_dep" in active_imps
+        assert "deferred_mypy" not in active_imps
+        assert "typing.Protocol" not in active_imps
+        assert "local_worker" not in active_imps
+        assert "local_async" not in active_imps
+        assert "method_local_dep" not in active_imps
+
+        deferred_imps = extract_python_imports(code, "pkg/service.py", include_deferred=True)
+        assert "deferred_mypy" in deferred_imps
+        assert "local_worker" in deferred_imps
+        assert "local_async" in deferred_imps
+        assert "method_local_dep" in deferred_imps
+
+    def test_python_src_layout_ancestor_pkg_relative_import(self) -> None:
+        """Finding 3: 'from pkg import models' inside src/pkg/service.py must recognize pkg as ancestor."""
+        from monorepo_triage.layer1_scanner import extract_python_imports
+
+        imps = extract_python_imports("from pkg import models\n", "src/pkg/service.py")
+        assert imps == ("pkg.models",)
+
+    def test_lexical_five_adversarial_cases(self) -> None:
+        """Finding 4: Auditor 1 Section 2.1 five lexical import edge cases."""
+        from monorepo_triage.layer1_scanner import extract_go_imports, extract_ts_js_imports
+
+        # 1. TS backtick in ${}
+        c1 = 'const m = `a ${x.join("`")}`;\nimport { foo } from "./foo";\n'
+        imps1 = extract_ts_js_imports(c1, "src/index.ts")
+        assert "src.foo" in imps1
+
+        # 2. TS dynamic import in ${}
+        c2 = 'const s = `hello ${await import("./dynamic")}`;\n'
+        imps2 = extract_ts_js_imports(c2, "src/index.ts")
+        assert "src.dynamic" in imps2
+
+        # 3. TS regex quote
+        c3 = 'const r = /foo"bar/;\nimport { bar } from "./bar";\n'
+        imps3 = extract_ts_js_imports(c3, "src/index.ts")
+        assert "src.bar" in imps3
+
+        # 4. TSX JSX apostrophe
+        c4 = 'const Component = () => <div>Don\'t fail</div>;\nimport { baz } from "./baz";\n'
+        imps4 = extract_ts_js_imports(c4, "src/index.tsx")
+        assert "src.baz" in imps4
+
+        # 5. Go aliased/blank imports
+        c5 = (
+            'package main\n'
+            'import _ "myrepo/pkg/mig"\n'
+            'import api "myrepo/pkg/api"\n'
+            'import . "myrepo/pkg/test"\n'
+        )
+        imps5 = extract_go_imports(c5)
+        assert "myrepo/pkg/mig" in imps5
+        assert "myrepo/pkg/api" in imps5
+        assert "myrepo/pkg/test" in imps5
 
 
 
