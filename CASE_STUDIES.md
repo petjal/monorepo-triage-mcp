@@ -1,7 +1,7 @@
 # Sample Pre-Flight Case Studies: Assessing External Repositories (`trpc/trpc` & `django/django`)
 
 > **Reader Orientation (Tool vs. Target Codebases & Authorship):**
-> * **How This Was Built:** I supplied the enterprise repository-triage ideas and verification gates from my 16 years diagnosing source code scanners at Black Duck (`bds_bom_Partition`), and used Google Gemini / Antigravity (`gemini-3.8-flash` builders + cold-context `gemini-4-argon` auditors) to write all of the code, tests, benchmarks, and reports.
+> * **How This Was Built:** I supplied the enterprise repository-triage architecture, boundary invariants, and verification gates from my 16 years diagnosing source code scanners at Black Duck (`bds_bom_Partition`), and directed AI coding agents to write the code, tests, benchmarks, and reports under five rounds of cold-context adversarial auditing.
 > * **This document (`CASE_STUDIES.md`)** presents sample Day-1 pre-flight assessment reports generated **by** `monorepo-triage-mcp` when pointed at two external public codebases (`trpc/trpc` and `django/django`) to simulate scoping a large-scale autonomous AI modernization engagement.
 > * **[`README.md`](https://github.com/petjal/monorepo-triage-mcp/blob/master/README.md)** explains the architecture and usage of the `monorepo-triage-mcp` server itself.
 > * **[`VERIFICATION_LOG.md`](https://github.com/petjal/monorepo-triage-mcp/blob/master/VERIFICATION_LOG.md)** documents the adversarial code audits, 85-test regression suite, and Linux cgroup performance profiling of **this repository's own Python source code**.

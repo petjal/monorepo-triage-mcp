@@ -5,7 +5,7 @@
 **Verification Baseline:** 85 passing unit tests (`pytest`), strict static typing (`mypy --strict`), zero lint violations (`ruff`)
 
 > **Reader Orientation (Internal Code QA vs. External Case Studies & Authorship):**
-> * **How This Was Built:** I supplied the enterprise repository-triage ideas, problem framing, and verification gates from my 16 years diagnosing source code scanners at Black Duck (`bds_bom_Partition`), and used Google Gemini / Antigravity (`gemini-3.8-flash` builders + cold-context `gemini-4-argon` auditors) to write all of the Python code, tests, benchmarks, and documentation.
+> * **How This Was Built:** I supplied the enterprise repository-triage ideas, problem framing, and verification gates from my 16 years diagnosing source code scanners at Black Duck (`bds_bom_Partition`), and directed AI coding agents to write the Python code, tests, benchmarks, and documentation under five rounds of cold-context adversarial auditing.
 > * **This document (`VERIFICATION_LOG.md`)** records the adversarial code audits, 85-test regression suite, and systems performance profiling of **`monorepo-triage-mcp`'s own Python source code**.
 > * For sample pre-flight assessment reports of **external repositories (`trpc/trpc` and `django/django`)** generated **by** this tool (written for project sponsors and engagement architects), see **[`CASE_STUDIES.md`](https://github.com/petjal/monorepo-triage-mcp/blob/master/CASE_STUDIES.md)**.
 
@@ -140,7 +140,7 @@ Two independent cold-context reviewer models were spawned to verify that the run
 
 ## 6. Round 5 Dual Cold-Context Whole-Repo Argon Audit (10 Defects & Invariant Violations Remediated)
 
-A dual cold-context whole-repo audit using `gemini-4-argon` (`conversation://9c936504-d000-4f93-bccc-36f85c7e4644` auditing engine, DLP, and graph resolution; `conversation://e6e6122a-75ef-49e6-b5dc-98efefdeca44` auditing benchmarks, case studies, and documentation) executed live probes across the entire repository and fresh clones of `django/django` and `trpc/trpc`, identifying 10 concrete defects:
+A dual cold-context whole-repo audit using isolated reasoning models executed live probes across the entire repository and fresh clones of `django/django` and `trpc/trpc`, identifying 10 concrete defects:
 
 ### Catch 25: Metric Inflation via Internal VCS & Tool Caches (`layer1_scanner.py`)
 * **The Defect:** Internal VCS metadata (`.git`, `.hg`, `.svn`) and tool caches (`__pycache__`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache`) were categorized as `BLOAT_DIR_NAMES` and processed through token estimation. In `django/django`, 3.85M pruned tokens (34.6%) came from `.git/objects/pack`, and running `pytest` or `mypy` mutated the repository's pruned token metrics.

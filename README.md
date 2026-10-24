@@ -2,8 +2,8 @@
 
 A deterministic legacy codebase pre-flight inspector, bloat pruner, Neo4j knowledge-graph exporter, and topological work-slice planner for autonomous coding agents, exposed as a Model Context Protocol (MCP) server (`triage_and_plan_repository` and `plan_dependency_graph`).
 
-> **How This Was Built (Human Ideas + AI Heavy Lifting):**
-> I am a 16-year enterprise systems and performance bottleneck engineer (`bds_bom_Partition` at Black Duck), not a career Python compiler developer. For this proof-of-concept repository, **I provided the enterprise repository-triage ideas, problem framing, and verification gates, and Google Gemini / Antigravity did all the heavy lifting of writing the Python code, unit tests, benchmarks, and documentation.** Specifically, builder models (`gemini-3.8-flash`) generated the implementation, while isolated, zero-context reviewer models (`gemini-4-argon`) were spawned across five adversarial rounds to break the code, run live cgroup benchmarks against `django/django` and `trpc/trpc`, and force fixes for 34 defects that single-agent code generation missed.
+> **How This Was Built (16-Year Enterprise Triage Architecture + AI-Executed Implementation):**
+> I am a 16-year enterprise systems and performance bottleneck engineer (`bds_bom_Partition` at Black Duck), not a career Python compiler developer. I built this proof-of-concept using the same **20% Human Architecture & Verification / 80% Autonomous AI Execution** workflow that enterprise modernization demands: I defined the 4-layer partitioning architecture, boundary invariants, and repository heuristics from my Black Duck field experience, and directed AI coding agents to write the Python code, unit tests, and documentation. Because single-pass AI code generation passed 48 happy-path unit tests while hiding severe architectural and systems edge-case bugs, I drove five rounds of isolated, zero-context adversarial red-teaming and Linux `cgroups v2` / `/proc/self/io` syscall profiling against live clones of `django/django` and `trpc/trpc` to isolate, verify, and lock down 34 defect remediations across an extensive regression test suite.
 
 > **Repository Document Map (Tool vs. External Case Studies vs. Internal QA):**
 > 1. **[`README.md`](https://github.com/petjal/monorepo-triage-mcp/blob/master/README.md) (This Document — The Tool):** Architecture, algorithms, and usage of the `monorepo-triage-mcp` server.
@@ -67,10 +67,10 @@ Running `triage_and_plan_repository` on this repository itself (`token_budget=16
 ```json
 {
   "scan_summary": {
-    "active_tokens": 43951,
-    "pruned_tokens": 18905,
+    "active_tokens": 44791,
+    "pruned_tokens": 18904,
     "quarantined_tokens": 0,
-    "token_reduction_ratio": 0.3008,
+    "token_reduction_ratio": 0.2968,
     "symlink_loops_skipped": [],
     "recommended_exclusions": [],
     "pruned_file_count": 7
@@ -78,7 +78,7 @@ Running `triage_and_plan_repository` on this repository itself (`token_budget=16
   "modernization_plan": {
     "cyclic_knot_count": 0,
     "max_wave_depth": 4,
-    "total_active_tokens": 43951,
+    "total_active_tokens": 44791,
     "token_budget": 16000,
     "slices": [
       {
@@ -106,7 +106,7 @@ Running `triage_and_plan_repository` on this repository itself (`token_budget=16
           "src.monorepo_triage.layer1_scanner",
           "tests.test_layer0_invariants"
         ],
-        "total_tokens": 8488,
+        "total_tokens": 8812,
         "status": "READY"
       },
       {
@@ -120,7 +120,7 @@ Running `triage_and_plan_repository` on this repository itself (`token_budget=16
           "src.monorepo_triage.layer2_slice_planner",
           "tests.test_layer1_scanner"
         ],
-        "total_tokens": 15003,
+        "total_tokens": 15519,
         "status": "READY"
       },
       {

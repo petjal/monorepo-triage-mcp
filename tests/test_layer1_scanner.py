@@ -554,12 +554,19 @@ class TestAuditRound4Layer1:
         (repo / "cert.key").write_text(
             "-----BEGIN RSA " + "PRIVATE KEY BLOCK-----\nMIIE...\n-----END RSA " + "PRIVATE KEY BLOCK-----\n"
         )
+        # Secret in env/ directory must NOT be skipped as bloat
+        env_dir = repo / "env"
+        env_dir.mkdir()
+        (env_dir / "secret.key").write_text(
+            "-----BEGIN RSA " + "PRIVATE KEY-----\nMIIE...\n-----END RSA " + "PRIVATE KEY-----\n"
+        )
 
         summary = scan_repository(repo)
         quarantined = {f.rel_path for f in summary.files if f.disposition == "QUARANTINED_DLP"}
         assert "creds_asia.py" in quarantined
         assert "creds_pat.py" in quarantined
         assert "cert.key" in quarantined
+        assert "env/secret.key" in quarantined
 
     def test_python_function_local_and_type_checking_imports_excluded(self) -> None:
         """Finding 3: def/async def bodies and if TYPE_CHECKING: blocks do not form module-load circular dependencies."""
@@ -570,7 +577,13 @@ class TestAuditRound4Layer1:
             "from sys import argv\n\n"
             "if TYPE_CHECKING:\n"
             "    import deferred_mypy\n"
-            "    from typing import Protocol\n\n"
+            "    from typing import Protocol\n"
+            "else:\n"
+            "    import runtime_else_dep\n\n"
+            "if not TYPE_CHECKING:\n"
+            "    import runtime_not_type_checking\n"
+            "else:\n"
+            "    import deferred_not_branch\n\n"
             "def worker():\n"
             "    import local_worker\n"
             "    return local_worker.run()\n\n"
@@ -587,14 +600,20 @@ class TestAuditRound4Layer1:
         assert "os" in active_imps
         assert "sys.argv" in active_imps
         assert "class_load_dep" in active_imps
+        assert "runtime_else_dep" in active_imps
+        assert "runtime_not_type_checking" in active_imps
         assert "deferred_mypy" not in active_imps
         assert "typing.Protocol" not in active_imps
+        assert "deferred_not_branch" not in active_imps
         assert "local_worker" not in active_imps
         assert "local_async" not in active_imps
         assert "method_local_dep" not in active_imps
 
         deferred_imps = extract_python_imports(code, "pkg/service.py", include_deferred=True)
         assert "deferred_mypy" in deferred_imps
+        assert "runtime_else_dep" in deferred_imps
+        assert "runtime_not_type_checking" in deferred_imps
+        assert "deferred_not_branch" in deferred_imps
         assert "local_worker" in deferred_imps
         assert "local_async" in deferred_imps
         assert "method_local_dep" in deferred_imps
@@ -614,6 +633,12 @@ class TestAuditRound4Layer1:
         c1 = 'const m = `a ${x.join("`")}`;\nimport { foo } from "./foo";\n'
         imps1 = extract_ts_js_imports(c1, "src/index.ts")
         assert "src.foo" in imps1
+
+        # 1b. TS inline URL before require() and glob with /*
+        c1b = 'const api = "https://acme.com"; const r = require("./url_dep");\nconst g = `packages/*`;\nimport { swallowed } from "./swallowed";\n'
+        imps1b = extract_ts_js_imports(c1b, "src/index.ts")
+        assert "src.url_dep" in imps1b
+        assert "src.swallowed" in imps1b
 
         # 2. TS dynamic import in ${}
         c2 = 'const s = `hello ${await import("./dynamic")}`;\n'

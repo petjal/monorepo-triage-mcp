@@ -47,7 +47,6 @@ BLOAT_DIR_NAMES: frozenset[str] = frozenset(
         "coverage",
         ".venv",
         "venv",
-        "env",
     }
 )
 
@@ -90,7 +89,7 @@ BINARY_SNIFF_BYTES: int = 8192
 ENTROPY_SAMPLE_BYTES: int = 8192
 
 _COMMENT_RE: re.Pattern[str] = re.compile(
-    r"""/\*[\s\S]*?\*/|//[^\r\n]*"""
+    r"""('(?:\\.|[^'\\\r\n])*'|"(?:\\.|[^"\\\r\n])*"|`(?:\\.|[^`\\])*`)|(/\*[\s\S]*?\*/|//[^\r\n]*)"""
 )
 
 _COMMENT_AND_ALL_STRINGS_RE: re.Pattern[str] = re.compile(
@@ -157,7 +156,11 @@ def compute_module_id(rel_path: str) -> str:
 def _strip_c_style_comments(text: str) -> str:
     """Strip // and /* */ comments while leaving string literals, backticks, and regexes intact."""
     return _COMMENT_RE.sub(
-        lambda m: "\n" if "\n" in m.group(0) else " ",
+        lambda m: (
+            m.group(1)
+            if m.group(1) is not None
+            else ("\n" if "\n" in m.group(0) else " ")
+        ),
         text,
     )
 
@@ -244,11 +247,29 @@ def extract_python_imports(
                         for alias in node.names:
                             if alias.name != "*":
                                 extracted.add(f"{base_mod}.{alias.name}")
-                elif not include_deferred and (
-                    isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    or (isinstance(node, ast.If) and _is_type_checking_guard(node.test))
+                elif not include_deferred and isinstance(
+                    node, (ast.FunctionDef, ast.AsyncFunctionDef)
                 ):
                     continue
+                elif not include_deferred and isinstance(node, ast.If):
+                    is_direct_guard = _is_type_checking_guard(node.test)
+                    is_negated_guard = (
+                        isinstance(node.test, ast.UnaryOp)
+                        and isinstance(node.test.op, ast.Not)
+                        and _is_type_checking_guard(node.test.operand)
+                    )
+                    if is_direct_guard:
+                        # TYPE_CHECKING is True in body (deferred), False in orelse (runtime fallback)
+                        if node.orelse:
+                            stmt_stack.append(ast.Module(body=node.orelse, type_ignores=[]))
+                        continue
+                    elif is_negated_guard:
+                        # not TYPE_CHECKING is True in body (runtime fallback), False in orelse
+                        if node.body:
+                            stmt_stack.append(ast.Module(body=node.body, type_ignores=[]))
+                        continue
+                    else:
+                        stmt_stack.append(node)
                 elif (
                     hasattr(node, "body")
                     or hasattr(node, "handlers")

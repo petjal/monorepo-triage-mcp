@@ -447,6 +447,12 @@ def _resolve_import_targets(
     # 4. Single-level symbol stripping (e.g. 'pkg.service.UserService' -> 'pkg.service')
     if "." in imp:
         parent_cand = imp.rsplit(".", 1)[0]
+        # In standard package re-exports, child submodules frequently use absolute imports
+        # of siblings (e.g. from pkg import models -> pkg.models) or from pkg import util.
+        # If parent_cand is a barrel and self is inside that barrel package (self_mod_id starts with parent_cand + "."),
+        # we do NOT synthesize an implicit back-edge from the child to its parent package barrel
+        # when stripping arbitrary symbols, as that creates false circular dependency knots between
+        # the package __init__.py/index.ts and all of its child submodules.
         if parent_cand in barrels and self_mod_id.startswith(parent_cand + "."):
             return resolved
         if parent_cand in active_module_set and parent_cand != self_mod_id:
