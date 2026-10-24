@@ -546,12 +546,14 @@ class TestAuditRound4Layer1:
         repo = tmp_path / "repo"
         repo.mkdir()
 
-        # Temporary AWS ASIA key
-        (repo / "creds_asia.py").write_text("AWS_TEMP = 'ASIA1234567890ABCDEF'\n")
+        # Temporary AWS ASIA key (split string literal so this test file itself is not quarantined)
+        (repo / "creds_asia.py").write_text("AWS_TEMP = 'ASIA" + "1234567890ABCDEF'\n")
         # Fine-grained GitHub PAT
-        (repo / "creds_pat.py").write_text("PAT = 'github_pat_11ABCD_12345678901234567890'\n")
+        (repo / "creds_pat.py").write_text("PAT = 'github_pat_" + "11ABCD_12345678901234567890'\n")
         # Old/alternate PEM block format
-        (repo / "cert.key").write_text("-----BEGIN RSA PRIVATE KEY BLOCK-----\nMIIE...\n-----END RSA PRIVATE KEY BLOCK-----\n")
+        (repo / "cert.key").write_text(
+            "-----BEGIN RSA " + "PRIVATE KEY BLOCK-----\nMIIE...\n-----END RSA " + "PRIVATE KEY BLOCK-----\n"
+        )
 
         summary = scan_repository(repo)
         quarantined = {f.rel_path for f in summary.files if f.disposition == "QUARANTINED_DLP"}

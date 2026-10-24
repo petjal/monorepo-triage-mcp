@@ -61,81 +61,104 @@ To verify efficiency on modest customer VMs, the full pipeline (`scan_repository
 
 ## Self-Hosting Example
 
-Running `triage_and_plan_repository` on this repository itself (`token_budget=16000`):
+Running `triage_and_plan_repository` on this repository itself (`token_budget=16000`, omitting `files` and `condensation_nodes` arrays for brevity):
 
 ```json
 {
   "scan_summary": {
-    "active_tokens": 36030,
-    "pruned_tokens": 15102,
-    "quarantined_tokens": 7890,
-    "token_reduction_ratio": 0.3895,
-    "pruned_file_count": 7,
+    "active_tokens": 43958,
+    "pruned_tokens": 18286,
+    "quarantined_tokens": 0,
+    "token_reduction_ratio": 0.2938,
     "symlink_loops_skipped": [],
-    "recommended_exclusions": []
+    "recommended_exclusions": [],
+    "pruned_file_count": 7
   },
   "modernization_plan": {
     "cyclic_knot_count": 0,
     "max_wave_depth": 4,
-    "total_active_tokens": 36030,
+    "total_active_tokens": 43958,
     "token_budget": 16000,
     "slices": [
       {
-        "slice_id": "slice_w0_000",
+        "slice_id": "wave_0_slice_00",
         "wave": 0,
-        "total_tokens": 1300,
-        "status": "READY",
         "scc_ids": [
-          "src.monorepo_triage.layer0_invariants",
-          "src.monorepo_triage"
-        ]
+          "src.monorepo_triage",
+          "src.monorepo_triage.layer0_invariants"
+        ],
+        "modules": [
+          "src.monorepo_triage",
+          "src.monorepo_triage.layer0_invariants"
+        ],
+        "total_tokens": 1300,
+        "status": "READY"
       },
       {
-        "slice_id": "slice_w1_000",
+        "slice_id": "wave_1_slice_00",
         "wave": 1,
-        "total_tokens": 8488,
-        "status": "READY",
         "scc_ids": [
           "src.monorepo_triage.layer1_scanner",
           "tests.test_layer0_invariants"
-        ]
+        ],
+        "modules": [
+          "src.monorepo_triage.layer1_scanner",
+          "tests.test_layer0_invariants"
+        ],
+        "total_tokens": 8488,
+        "status": "READY"
       },
       {
-        "slice_id": "slice_w2_000",
+        "slice_id": "wave_2_slice_00",
         "wave": 2,
-        "total_tokens": 7082,
-        "status": "READY",
         "scc_ids": [
-          "src.monorepo_triage.layer2_slice_planner"
-        ]
+          "src.monorepo_triage.layer2_slice_planner",
+          "tests.test_layer1_scanner"
+        ],
+        "modules": [
+          "src.monorepo_triage.layer2_slice_planner",
+          "tests.test_layer1_scanner"
+        ],
+        "total_tokens": 15010,
+        "status": "READY"
       },
       {
-        "slice_id": "slice_w3_000",
+        "slice_id": "wave_3_slice_00",
         "wave": 3,
-        "total_tokens": 10609,
-        "status": "READY",
         "scc_ids": [
+          "src.monorepo_triage.server",
           "tests.test_layer2_slice_planner"
-        ]
+        ],
+        "modules": [
+          "src.monorepo_triage.server",
+          "tests.test_layer2_slice_planner"
+        ],
+        "total_tokens": 11601,
+        "status": "READY"
       },
       {
-        "slice_id": "slice_w3_001",
+        "slice_id": "wave_3_slice_01",
         "wave": 3,
-        "total_tokens": 6673,
-        "status": "READY",
         "scc_ids": [
-          "examples.run_django_sprint_demo",
-          "src.monorepo_triage.server"
-        ]
+          "examples.run_django_sprint_demo"
+        ],
+        "modules": [
+          "examples.run_django_sprint_demo"
+        ],
+        "total_tokens": 5681,
+        "status": "READY"
       },
       {
-        "slice_id": "slice_w4_000",
+        "slice_id": "wave_4_slice_00",
         "wave": 4,
-        "total_tokens": 1878,
-        "status": "READY",
         "scc_ids": [
           "tests.test_server"
-        ]
+        ],
+        "modules": [
+          "tests.test_server"
+        ],
+        "total_tokens": 1878,
+        "status": "READY"
       }
     ]
   }
